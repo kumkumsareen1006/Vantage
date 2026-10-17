@@ -8,6 +8,7 @@ from urllib.parse import unquote_to_bytes
 import pandas as pd
 
 from prototype import config
+from prototype.normalize import normalize_title_series
 
 FILENAME_RE = re.compile(r"pageviews-(\d{8})-(\d{2})0000\.gz$")
 QUARANTINE_COLUMNS = ["source_file", "raw_line", "reason"]
@@ -123,8 +124,7 @@ def normalize_titles(df: pd.DataFrame, source_file: str):
     failed = decoded.isna()
     title = title.where(~has_escape, decoded)
 
-    title = title.str.strip().str.replace(" ", "_", regex=False)
-    title = title.str[:1].str.upper() + title.str[1:]
+    title = normalize_title_series(title)
     df["title"] = title
 
     reasons = pd.Series(pd.NA, index=df.index, dtype="string")
