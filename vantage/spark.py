@@ -21,6 +21,9 @@ def get_spark(app_name="vantage", master="local[*]", driver_memory=DRIVER_MEMORY
         .config("spark.driver.memory", driver_memory)
         .config("spark.sql.shuffle.partitions", SHUFFLE_PARTITIONS)
         .config("spark.sql.session.timeZone", "UTC")
+        # bind to loopback so Spark doesn't depend on the machine's hostname/IP (changes between networks)
+        .config("spark.driver.bindAddress", "127.0.0.1")
+        .config("spark.driver.host", "localhost")
     )
     # configure_spark_with_delta_pip adds the delta-spark jars matching the installed pip version
     spark = configure_spark_with_delta_pip(builder).getOrCreate()

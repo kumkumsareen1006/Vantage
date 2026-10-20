@@ -5,3 +5,6 @@ __pycache__/
 .DS_Store 
 notes/
 CLAUDE.md
+spark-warehouse/
+metastore_db/
+derby.log
