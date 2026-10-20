@@ -7,8 +7,11 @@ except URL-decoding, which goes through a pandas UDF calling the prototype
 decoder so the "+ is literal / bad escape -> None" behaviour matches exactly.
 
 Lives in validate/ (not transform/): the job here is schema enforcement and
-quarantining. Collision aggregation and the Silver MERGE are transforms (Day 7),
-so this does neither -- it returns the pre-aggregation (clean, quarantine).
+quarantining. Collision aggregation and the Silver MERGE are transforms (Day 7).
+
+`annotate_bronze` does the parse once and tags every row with a (nullable)
+reason and an is_non_article flag; clean_rows/quarantine_rows derive the two
+outputs from it, so a caller can persist one parse and get both branches.
 """
 import pandas as pd
 from pyspark.sql import functions as F, types as T
@@ -56,12 +59,10 @@ def _normalize_title(col):
     return F.concat(F.upper(t.substr(F.lit(1), F.lit(1))), t.substr(F.lit(2), F.length(t)))
 
 
-def clean_bronze(bronze):
-    """Return (clean, quarantine) from a Bronze DataFrame (value, source_file, file_hour).
-
-    clean matches SILVER_SCHEMA; quarantine matches QUARANTINE_SCHEMA. No collision
-    aggregation and no Silver write -- those are Day 7.
-    """
+def annotate_bronze(bronze):
+    """One row per Bronze line, parsed once and tagged with:
+    project, title, views, bytes, source_file, file_hour, reason (null = survives),
+    is_non_article (only meaningful when reason is null)."""
     df = bronze.select(F.col("value").alias("raw_line"), "source_file", "file_hour")
 
     title_raw = F.col("_title_raw")
@@ -76,21 +77,18 @@ def clean_bronze(bronze):
         .withColumn("_bytes", F.regexp_extract("raw_line", _LINE_RE, 4))
         .withColumn("_quoted", quoted)
         .withColumn("_unquoted", F.when(quoted, F.regexp_replace(core, r"\\(.)", "$1")).otherwise(title_raw))
+        .withColumn("parse_reason", F.coalesce(
+            F.when(F.col("raw_line").contains(REPLACEMENT_CHAR), F.lit("bad_utf8")),
+            F.when(~F.col("_matched"), F.lit("wrong_field_count")),
+            F.when(~F.col("_views").rlike(_DIGITS), F.lit("bad_views")),
+            F.when(~F.col("_bytes").rlike(_DIGITS), F.lit("bad_bytes")),
+            F.when(F.col("_title_raw").startswith('"') & ~F.col("_quoted"), F.lit("unbalanced_quote")),
+            F.when(F.col("_unquoted") == "", F.lit("empty_title")),
+        ))
     )
 
-    # parse-stage reason, in the prototype's precedence order (first match wins)
-    reason = F.coalesce(
-        F.when(F.col("raw_line").contains(REPLACEMENT_CHAR), F.lit("bad_utf8")),
-        F.when(~F.col("_matched"), F.lit("wrong_field_count")),
-        F.when(~F.col("_views").rlike(_DIGITS), F.lit("bad_views")),
-        F.when(~F.col("_bytes").rlike(_DIGITS), F.lit("bad_bytes")),
-        F.when(F.col("_title_raw").startswith('"') & ~F.col("_quoted"), F.lit("unbalanced_quote")),
-        F.when(F.col("_unquoted") == "", F.lit("empty_title")),
-    )
-    df = df.withColumn("reason", reason)
-
-    q1 = df.where(F.col("reason").isNotNull()).select("source_file", "raw_line", "reason", "file_hour")
-    surv = df.where(F.col("reason").isNull())
+    surv = df.where(F.col("parse_reason").isNull())
+    failed = df.where(F.col("parse_reason").isNotNull())
 
     # URL-decode only %-titles, and only those rows, so the Python decoder isn't
     # called on the (vast) majority with no escapes.
@@ -104,41 +102,74 @@ def clean_bronze(bronze):
              .withColumn("_failed", F.lit(False))
              .withColumn("_title1", F.col("_unquoted")))
     surv = esc.unionByName(noesc).withColumn("_norm", _normalize_title(F.col("_title1")))
-
-    reason2 = F.coalesce(
+    surv = surv.withColumn("reason", F.coalesce(
         F.when(F.col("_failed"), F.lit("bad_url_encoding")),
         F.when(F.col("_norm").isNull() | (F.col("_norm") == ""), F.lit("empty_title")),
-    )
-    surv = surv.withColumn("reason2", reason2)
+    ))
 
-    q2 = surv.where(F.col("reason2").isNotNull()).select(
-        "source_file", "raw_line", F.col("reason2").alias("reason"), "file_hour")
-    surv2 = surv.where(F.col("reason2").isNull())
-
-    # drop non-article namespaces and the "-" placeholder (counted, not quarantined)
     t = F.col("_norm")
-    prefix = F.lower(F.split(t, ":").getItem(0))
-    is_non_article = (t.contains(":") & prefix.isin(_NAMES_LOWER)) | t.isin(_PLACEHOLDERS)
+    is_non_article = (t.contains(":") & F.lower(F.split(t, ":").getItem(0)).isin(_NAMES_LOWER)) | t.isin(_PLACEHOLDERS)
 
-    clean = surv2.where(~is_non_article).select(
+    surv_ann = surv.select(
+        "source_file", "raw_line", "file_hour",
         F.col("project").cast("string").alias("project"),
-        F.col("_norm").cast("string").alias("title"),
-        F.col("file_hour").cast("timestamp").alias("hour"),
         F.col("_views").cast("long").alias("views"),
         F.col("_bytes").cast("long").alias("bytes"),
-        F.col("source_file").cast("string").alias("source_file"),
+        F.col("_norm").cast("string").alias("title"),
+        F.col("reason"),
+        is_non_article.alias("is_non_article"),
     )
+    failed_ann = failed.select(
+        "source_file", "raw_line", "file_hour",
+        F.col("project").cast("string").alias("project"),
+        F.col("_views").cast("long").alias("views"),
+        F.col("_bytes").cast("long").alias("bytes"),
+        F.lit(None).cast("string").alias("title"),
+        F.col("parse_reason").alias("reason"),
+        F.lit(False).alias("is_non_article"),
+    )
+    return surv_ann.unionByName(failed_ann)
 
-    quarantine = q1.unionByName(q2).withColumn("quarantined_at", F.current_timestamp())
-    return clean, quarantine
+
+def clean_rows(ann):
+    return ann.where(F.col("reason").isNull() & ~F.col("is_non_article")).select(
+        "project", "title", F.col("file_hour").alias("hour"), "views", "bytes", "source_file")
+
+
+def quarantine_rows(ann):
+    return (ann.where(F.col("reason").isNotNull())
+            .select("source_file", "raw_line", "reason", "file_hour")
+            .withColumn("quarantined_at", F.current_timestamp()))
+
+
+def clean_bronze(bronze):
+    """(clean, quarantine) from a Bronze DataFrame. clean matches SILVER_SCHEMA,
+    quarantine matches QUARANTINE_SCHEMA. No aggregation, no write."""
+    ann = annotate_bronze(bronze)
+    return clean_rows(ann), quarantine_rows(ann)
 
 
 def write_quarantine(quarantine, path):
-    """Overwrite the quarantine table with the full recompute.
-
-    Quarantine is a deterministic function of Bronze, so overwriting with the
-    complete recomputed set is idempotent -- re-running yields identical rows and
-    zero duplicates. It also avoids a synthetic key, which a content-based MERGE
-    would need and which would wrongly collapse two identical bad lines into one.
-    """
+    """Full-overwrite write (Day 6). Idempotent: quarantine is a deterministic
+    function of Bronze, so overwriting with the full recompute yields identical
+    rows and zero duplicates."""
     quarantine.write.format("delta").mode("overwrite").save(str(path))
+
+
+def write_quarantine_for_file(quarantine, path, source_file):
+    """Replace only this file's quarantine rows (replaceWhere on source_file), so
+    an incremental run never rewrites the whole table and re-running one file
+    can't duplicate its rows. All rows written satisfy the predicate."""
+    (quarantine.write.format("delta").mode("overwrite")
+     .option("replaceWhere", f"source_file = '{source_file}'")
+     .save(str(path)))
+
+
+def write_quarantine_for_files(quarantine, path, source_files):
+    """Same as write_quarantine_for_file for a whole day's batch: replace exactly
+    the quarantine rows of the files reprocessed this run, leaving every other
+    file's rows alone. source_files are dump filenames, so the IN-list is safe."""
+    in_list = ", ".join(f"'{f}'" for f in source_files)
+    (quarantine.write.format("delta").mode("overwrite")
+     .option("replaceWhere", f"source_file IN ({in_list})")
+     .save(str(path)))
