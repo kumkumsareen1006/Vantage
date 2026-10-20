@@ -37,7 +37,6 @@ QUARANTINE_SCHEMA = T.StructType([
     T.StructField("quarantined_at", T.TimestampType()),
 ])
 
-REPLACEMENT_CHAR = "�"  # spark.read.text put this where the gz had invalid UTF-8 (Bronze gap)
 _DIGITS = r"^\d+$"
 # project SP title SP views SP bytes; title greedy, views/bytes allowed empty so a
 # double space yields an empty views field (-> bad_views), matching the prototype's
@@ -78,7 +77,11 @@ def annotate_bronze(bronze):
         .withColumn("_quoted", quoted)
         .withColumn("_unquoted", F.when(quoted, F.regexp_replace(core, r"\\(.)", "$1")).otherwise(title_raw))
         .withColumn("parse_reason", F.coalesce(
-            F.when(F.col("raw_line").contains(REPLACEMENT_CHAR), F.lit("bad_utf8")),
+            # spark.read.text keeps raw bytes, so invalid UTF-8 stays as those bytes
+            # (not U+FFFD) in the SQL string; a UTF-8 round-trip only alters a string
+            # that wasn't valid UTF-8 -- the prototype's decode-error -> bad_utf8 rule.
+            F.when(F.col("raw_line") != F.decode(F.encode("raw_line", "UTF-8"), "UTF-8"),
+                   F.lit("bad_utf8")),
             F.when(~F.col("_matched"), F.lit("wrong_field_count")),
             F.when(~F.col("_views").rlike(_DIGITS), F.lit("bad_views")),
             F.when(~F.col("_bytes").rlike(_DIGITS), F.lit("bad_bytes")),

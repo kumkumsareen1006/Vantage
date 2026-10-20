@@ -13,6 +13,8 @@ def bronze_df(spark, lines, name="pageviews-20261015-130000.gz"):
 
 
 def test_each_quarantine_reason(spark):
+    # bad_utf8 needs genuinely invalid bytes, which a Python-string DataFrame can't
+    # hold; it's covered end-to-end on a real gz in test_parity.
     lines = {
         "en Bad_Views 12x 0": "bad_views",
         "en OnlyThree 1": "wrong_field_count",
@@ -20,13 +22,20 @@ def test_each_quarantine_reason(spark):
         'en "Unclosed 1 0': "unbalanced_quote",
         "en %E9%A1 1 0": "bad_url_encoding",     # bad %-escape -> invalid UTF-8
         "en  5 0": "empty_title",                # double space -> empty title
-        "en Caf�e 1 0": "bad_utf8",         # U+FFFD from Bronze's decode
         "en Good 10 0": None,                    # survives, not quarantined
     }
     clean, quarantine = clean_bronze(bronze_df(spark, list(lines)))
     got = {r["raw_line"]: r["reason"] for r in quarantine.collect()}
     assert got == {k: v for k, v in lines.items() if v is not None}
     assert "Good" in {r["title"] for r in clean.collect()}
+
+
+def test_literal_replacement_char_is_kept(spark):
+    # A real U+FFFD character is valid UTF-8, so (like the prototype) it is not
+    # bad_utf8; it stays as an ordinary title character.
+    clean, quarantine = clean_bronze(bronze_df(spark, ["en Caf�e 1 0"]))
+    assert quarantine.count() == 0
+    assert "Caf�e" in {r["title"] for r in clean.collect()}
 
 
 def test_plus_kept_namespace_and_placeholder_dropped(spark):
