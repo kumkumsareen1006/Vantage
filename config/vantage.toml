@@ -1,0 +1,51 @@
+# Vantage configuration — the single source of truth for paths, scope and
+# thresholds. Read with tomllib by vantage/config.py; prototype/config.py
+# re-exports these same values so nothing is defined in two places.
+
+[projects]
+in_scope = ["en", "en.m"]
+
+[titles]
+# Non-article namespaces dropped from pageviews, matched on the prefix before
+# the first colon (case-insensitive).
+non_article_namespaces = [
+  "Talk",
+  "User", "User_talk",
+  "Wikipedia", "Wikipedia_talk", "WP", "WT", "Project", "Project_talk",
+  "File", "File_talk", "Image", "Image_talk", "Media",
+  "MediaWiki", "MediaWiki_talk",
+  "Template", "Template_talk",
+  "Help", "Help_talk",
+  "Category", "Category_talk",
+  "Portal", "Portal_talk",
+  "Draft", "Draft_talk",
+  "TimedText", "TimedText_talk",
+  "Module", "Module_talk",
+  "Special",
+]
+placeholders = ["-"]
+
+[window]
+# Day 3 analysis window (UTC), by hour START; end is exclusive.
+start = "2026-10-15T00"
+end = "2026-10-17T00"
+
+[spikes]
+# Robust z-score over the previous baseline_hours, current hour excluded.
+baseline_hours = 24
+z_min = 6.0
+views_floor = 1000
+min_jump = 1000
+
+[paths]
+# All paths are relative to the project root.
+raw_pageviews = "data/raw/pageviews"
+raw_edits = "data/raw/edits"
+interim_pageviews = "data/interim/pageviews"
+
+[lake]
+# Medallion Delta tables (Phase 1+).
+bronze = "data/lake/bronze"
+silver = "data/lake/silver"
+gold = "data/lake/gold"
+quarantine = "data/lake/quarantine"
