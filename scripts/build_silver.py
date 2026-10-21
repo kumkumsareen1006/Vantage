@@ -76,8 +76,9 @@ def main(full):
         agg_n = batch.count()
         merge_silver(spark, batch, silver_path)
         quar = quarantine_rows(ann)
-        if quar.count() > 0:             # replace only this day's files; skip if none
-            write_quarantine_for_files(quar, quar_path, day_files)
+        # always replace this day's files' quarantine rows, even when empty, so a
+        # reprocessed file whose bad line was fixed loses its now-stale rows
+        write_quarantine_for_files(quar, quar_path, day_files)
         ann.unpersist()
         total_clean += clean_n
         collisions.append(clean_n - agg_n)

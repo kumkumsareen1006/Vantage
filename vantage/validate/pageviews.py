@@ -14,6 +14,7 @@ reason and an is_non_article flag; clean_rows/quarantine_rows derive the two
 outputs from it, so a caller can persist one parse and get both branches.
 """
 import pandas as pd
+from delta.tables import DeltaTable
 from pyspark.sql import functions as F, types as T
 from pyspark.sql.functions import pandas_udf
 
@@ -169,10 +170,13 @@ def write_quarantine_for_file(quarantine, path, source_file):
 
 
 def write_quarantine_for_files(quarantine, path, source_files):
-    """Same as write_quarantine_for_file for a whole day's batch: replace exactly
-    the quarantine rows of the files reprocessed this run, leaving every other
-    file's rows alone. source_files are dump filenames, so the IN-list is safe."""
-    in_list = ", ".join(f"'{f}'" for f in source_files)
-    (quarantine.write.format("delta").mode("overwrite")
-     .option("replaceWhere", f"source_file IN ({in_list})")
-     .save(str(path)))
+    """Replace exactly the quarantine rows of the files reprocessed this run,
+    leaving every other file's rows alone -- including when the new set is empty,
+    so a file whose last bad line was fixed loses its now-stale rows. source_files
+    are dump filenames, so the IN-list is safe."""
+    path = str(path)
+    writer = quarantine.write.format("delta").mode("overwrite")
+    if DeltaTable.isDeltaTable(quarantine.sparkSession, path):
+        in_list = ", ".join(f"'{f}'" for f in source_files)
+        writer = writer.option("replaceWhere", f"source_file IN ({in_list})")
+    writer.save(path)  # no table yet -> plain create; nothing stale to replace
