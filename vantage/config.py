@@ -23,6 +23,8 @@ BASELINE_HOURS = CONFIG["spikes"]["baseline_hours"]
 Z_MIN = CONFIG["spikes"]["z_min"]
 VIEWS_FLOOR = CONFIG["spikes"]["views_floor"]
 MIN_JUMP = CONFIG["spikes"]["min_jump"]
+DESKTOP_SHARE_MIN = CONFIG["spikes"]["desktop_share_min"]
+ISOLATION_RATIO = CONFIG["spikes"]["isolation_ratio"]
 
 
 def _abs(rel: str) -> Path:

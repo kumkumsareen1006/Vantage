@@ -108,3 +108,47 @@ def test_top_pages_daily_sums_hours_and_projects(spark):
     got = {r["title"]: r for r in top_pages_daily(silver_df(spark, rows), n=10).collect()}
     assert got["A"]["views"] == 250            # across both hours and both projects
     assert got["B"]["views"] == 120
+
+
+# ---- likely_automated label (en vs en.m, neighbour isolation, window edge) ----
+
+def _auto_kwargs():
+    return dict(baseline=24, z_min=6, views_floor=1000, min_jump=1000,
+                desktop_share_min=0.8, isolation_ratio=0.05)
+
+
+def test_isolated_desktop_spike_is_flagged(spark):
+    # Filler holds a contiguous axis 0..26. Auto appears only at hour 25: desktop-
+    # dominated, neighbours (24, 26) are zero-filled -> isolated and labelled.
+    rows = [("en", "Filler", i, 2000) for i in range(27)]
+    rows += [("en", "Auto", 25, 5000), ("en.m", "Auto", 25, 200)]
+    scored = scored_list(spike_scores(silver_df(spark, rows), **_auto_kwargs()))
+    a = [r for r in scored if r["title"] == "Auto" and r["hs"] == hs(25)]
+    assert len(a) == 1
+    assert a[0]["views"] == 5200 and a[0]["en_views"] == 5000 and a[0]["mobile_views"] == 200
+    assert a[0]["is_spike"] and a[0]["likely_automated"]
+
+
+def test_ramping_mobile_spike_not_flagged(spark):
+    # Organic ramps 22..26 and skews mobile; its spike hour (25) has a busy neighbour
+    # (24 = 3000, not near-zero) and desktop_share 0.3 -> a real spike, not automated.
+    rows = [("en", "Filler", i, 2000) for i in range(27)]
+    ramp = {22: 300, 23: 1500, 24: 3000, 25: 6000, 26: 4000}
+    for h, v in ramp.items():
+        desk = int(v * 0.3)
+        rows += [("en", "Organic", h, desk), ("en.m", "Organic", h, v - desk)]
+    scored = scored_list(spike_scores(silver_df(spark, rows), **_auto_kwargs()))
+    o = [r for r in scored if r["title"] == "Organic" and r["hs"] == hs(25)]
+    assert len(o) == 1 and o[0]["views"] == 6000
+    assert o[0]["is_spike"] and not o[0]["likely_automated"]
+
+
+def test_edge_hour_spike_not_flagged(spark):
+    # Edge spikes at the last axis hour (25): desktop-heavy and left-isolated, but the
+    # right neighbour is outside the window (null) so isolation can't be confirmed.
+    rows = [("en", "Filler", i, 2000) for i in range(26)]   # axis 0..25
+    rows += [("en", "Edge", 25, 5000), ("en.m", "Edge", 25, 100)]
+    scored = scored_list(spike_scores(silver_df(spark, rows), **_auto_kwargs()))
+    e = [r for r in scored if r["title"] == "Edge" and r["hs"] == hs(25)]
+    assert len(e) == 1 and e[0]["next_views"] is None
+    assert e[0]["is_spike"] and not e[0]["likely_automated"]

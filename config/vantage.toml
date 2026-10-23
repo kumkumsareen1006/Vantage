@@ -36,6 +36,11 @@ baseline_hours = 24
 z_min = 6.0
 views_floor = 1000
 min_jump = 1000
+# A flagged spike is also labelled likely_automated when it is desktop-dominated
+# and isolated: a single hour whose neighbours are near-zero. Organic stories ramp
+# and decay over neighbouring hours and skew mobile; scraper/redirect bursts don't.
+desktop_share_min = 0.8
+isolation_ratio = 0.05
 
 [paths]
 # All paths are relative to the project root.

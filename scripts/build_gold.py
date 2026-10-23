@@ -50,13 +50,26 @@ def main():
     grid_titles = scored.select("title").distinct().count()
     flagged = scored.where(F.col("is_spike")).cache()
     f_n = flagged.count()
+    auto = flagged.where(F.col("likely_automated")).cache()
+    a_n = auto.count()
     overwrite(scored, gold / "spikes")
     secs = time.perf_counter() - t0
 
     print(f"gold top_pages_hourly rows: {h_n:,}")
     print(f"gold top_pages_daily rows:  {d_n:,}")
-    print(f"gold spikes rows (scored):  {s_n:,}   titles in grid: {grid_titles:,}   is_spike=true: {f_n:,}")
+    print(f"gold spikes rows (scored):  {s_n:,}   titles in grid: {grid_titles:,}   "
+          f"is_spike=true: {f_n:,}   likely_automated=true: {a_n:,}")
     print(f"built gold in {secs:.1f}s")
+
+    print(f"\nlikely_automated spikes ({a_n}):")
+    for r in (auto.orderBy(F.col("views").desc(), F.col("title").asc())
+              .select(F.date_format("hour", "yyyy-MM-dd HH:mm").alias("hour"), "views",
+                      F.round(F.col("en_views") / F.col("views"), 3).alias("desktop_share"),
+                      "en_views", "mobile_views", "prev_views", "next_views", "title")
+              .collect()):
+        print(f"  {r['hour']} UTC  views={r['views']:>8,}  desktop_share={r['desktop_share']}  "
+              f"(en={r['en_views']:,} / mobile={r['mobile_views']:,})  "
+              f"prev={r['prev_views']}  next={r['next_views']}  {r['title']}")
 
     print("\ntop 10 spikes by z:")
     top10 = (flagged.orderBy(F.col("z").desc(), F.col("title").asc())

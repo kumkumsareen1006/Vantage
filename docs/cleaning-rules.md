@@ -110,9 +110,38 @@ inside the window are zero-filled.
 - The first `BASELINE_HOURS` hours of the window are warm-up only (no full
   baseline) and are never flagged.
 
-Current thresholds (in `prototype/config.py`): `BASELINE_HOURS = 24`,
-`Z_MIN = 6`, `VIEWS_FLOOR = 1000`, `MIN_JUMP = 1000`. Tuned on 43 hours of data, 2026-10-15 00:00 to 2026-10-16 18:00 UTC (hour start)
-to surface the obvious top movers without flagging the long tail of small blips.
+### `likely_automated` (a label, not a drop)
+
+A flagged spike is additionally labelled `likely_automated` when **both** hold:
+
+- **Desktop-dominated:** `en_views / views ≥ DESKTOP_SHARE_MIN` (0.8). Organic
+  attention on English Wikipedia skews mobile; a burst that is almost all desktop
+  is a signature of scrapers, redirects, or a single automated client.
+- **Isolated:** the hour immediately before and the hour immediately after both
+  have `views < ISOLATION_RATIO × views` (0.05) — near-zero on both sides. A real
+  story ramps up and decays over neighbouring hours; an automated burst is one
+  hour with nothing around it. A neighbour hour **outside the window is unknown**,
+  so the label is `false` there (isolation cannot be confirmed).
+
+The label never changes `is_spike`; it is an extra column so an automated-looking
+spike can be filtered out or inspected separately. The spikes table keeps
+`en_views`, `mobile_views` and the two neighbour view counts so the label is
+auditable.
+
+Evidence, from the 2026-10-15 00:00 – 2026-10-18 00:00 UTC window:
+
+- `Ying` — the window's single largest spike: **886,853 views in the one hour
+  2026-10-17 17:00**, 90% desktop (en 798,356 / en.m 88,497), both neighbour hours
+  ≤ 1 view, and **zero edits** in the entire window. Labelled `likely_automated`.
+- `Hôtel_de_Ville,_Limoges` — flagged 19:00–23:00 on 2026-10-17, but a clean
+  **mobile-heavy ramp** (20:00 was en 2,464 / en.m 4,368 — 36% desktop) spread over
+  several neighbouring hours with 60 co-occurring human edits. **Not** labelled.
+
+Current thresholds (in `config/vantage.toml`, re-exported by `prototype/config.py`):
+`BASELINE_HOURS = 24`, `Z_MIN = 6`, `VIEWS_FLOOR = 1000`, `MIN_JUMP = 1000`,
+`DESKTOP_SHARE_MIN = 0.8`, `ISOLATION_RATIO = 0.05`. Tuned on 43 hours of data,
+2026-10-15 00:00 to 2026-10-16 18:00 UTC (hour start) to surface the obvious top
+movers without flagging the long tail of small blips.
 
 ## Quarantine reasons
 
