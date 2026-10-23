@@ -11,10 +11,11 @@ to per-file. Skip-already-processed stays at the file level. Run from project ro
 
     python scripts/build_silver.py            # incremental: only new files
     python scripts/build_silver.py --full     # reprocess every file through MERGE
+
+The per-day loop is shared with the full pipeline (vantage.pipeline.silver_day_loop).
 """
 import sys
 import time
-from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -23,11 +24,8 @@ from delta.tables import DeltaTable
 from pyspark.sql import functions as F
 
 from vantage import config
+from vantage.pipeline import silver_day_loop, silver_todo
 from vantage.spark import get_spark
-from vantage.transform.silver import (aggregate_collisions, files_to_process,
-                                      merge_silver, silver_source_files)
-from vantage.validate.pageviews import (annotate_bronze, clean_rows,
-                                        quarantine_rows, write_quarantine_for_files)
 
 
 def main(full):
@@ -42,48 +40,15 @@ def main(full):
     bronze = spark.read.format("delta").load(str(config.LAKE["bronze"]))
     silver_path, quar_path = config.LAKE["silver"], config.LAKE["quarantine"]
 
-    # (file_date, source_file) straight from Bronze, so days line up with the actual
-    # partitions rather than re-deriving a date from the filename (they differ at
-    # the midnight boundary: a file's start hour, not its label, sets file_date).
-    pairs = bronze.select("file_date", "source_file").distinct().collect()
-    day_of = {r["source_file"]: r["file_date"] for r in pairs}
-    all_day_files = defaultdict(set)
-    for r in pairs:
-        all_day_files[r["file_date"]].add(r["source_file"])
-
-    all_files = sorted(day_of)
-    done = silver_source_files(spark, silver_path)
-    todo = files_to_process(all_files, done, full)
-    todo_by_day = defaultdict(list)
-    for f in todo:
-        todo_by_day[day_of[f]].append(f)
-    days = sorted(todo_by_day)
+    todo, day_of, all_day_files, all_files, done = silver_todo(spark, bronze, silver_path, full)
     print(f"bronze files: {len(all_files)}  in silver: {len(done)}  "
-          f"to process: {len(todo)} files over {len(days)} day(s)  (full={full})")
+          f"to process: {len(todo)} files  (full={full})")
 
-    total_clean = 0
-    collisions = []  # one entry per day
     t0 = time.perf_counter()
-    for day in days:
-        day_files = sorted(todo_by_day[day])
-        sub = bronze.where(F.col("file_date") == F.lit(day))  # partition pruning
-        if set(day_files) != all_day_files[day]:               # incremental subset
-            sub = sub.where(F.col("source_file").isin(day_files))
-        ann = annotate_bronze(sub).persist()
-        clean = clean_rows(ann)
-        batch = aggregate_collisions(clean)
-        clean_n = clean.count()          # first action: the single parse, now cached
-        agg_n = batch.count()
-        merge_silver(spark, batch, silver_path)
-        quar = quarantine_rows(ann)
-        # always replace this day's files' quarantine rows, even when empty, so a
-        # reprocessed file whose bad line was fixed loses its now-stale rows
-        write_quarantine_for_files(quar, quar_path, day_files)
-        ann.unpersist()
-        total_clean += clean_n
-        collisions.append(clean_n - agg_n)
-        print(f"  {day}: {len(day_files)} files, clean {clean_n:,}, collisions {clean_n - agg_n}")
+    info = silver_day_loop(spark, bronze, silver_path, quar_path, todo, day_of, all_day_files)
     secs = time.perf_counter() - t0
+    for d in info["per_day"]:
+        print(f"  {d['day']}: {d['files']} files, clean {d['clean']:,}, collisions {d['collisions']}")
 
     silver = spark.read.format("delta").load(str(silver_path))
     silver_rows = silver.count()
@@ -92,8 +57,9 @@ def main(full):
     quar_n = (spark.read.format("delta").load(str(quar_path)).count()
               if DeltaTable.isDeltaTable(spark, str(quar_path)) else 0)
 
-    print(f"processed {len(todo)} files over {len(days)} day(s) in {secs:.1f}s")
-    print(f"clean rows in (this run): {total_clean:,}")
+    collisions = [d["collisions"] for d in info["per_day"]]
+    print(f"processed {len(todo)} files over {len(info['days'])} day(s) in {secs:.1f}s")
+    print(f"clean rows in (this run): {info['total_clean']:,}")
     if collisions:
         print(f"collisions merged: total {sum(collisions):,}  per-day min {min(collisions)}  max {max(collisions)}")
     print(f"SILVER rows: {silver_rows:,}")
