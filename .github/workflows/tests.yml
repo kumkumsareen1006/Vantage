@@ -1,0 +1,39 @@
+name: tests
+
+on: [push, pull_request]
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Set up Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # PySpark resolves the delta-spark jars through Ivy on first run; cache them
+      # so later runs skip the Maven download.
+      - name: Cache Ivy jars
+        uses: actions/cache@v4
+        with:
+          path: ~/.ivy2
+          key: ivy2-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: ivy2-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        run: pytest -q
