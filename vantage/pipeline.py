@@ -64,6 +64,11 @@ def _dir_bytes(path, pattern="*.parquet"):
     return sum(f.stat().st_size for f in Path(path).rglob(pattern))
 
 
+def _dir_bytes_all(path):
+    # whole on-disk footprint: data files plus the _delta_log
+    return sum(f.stat().st_size for f in Path(path).rglob("*") if f.is_file())
+
+
 # Each stage runs in its own SparkSession: one driver process, but the session is
 # stopped between stages so a heavy stage (Silver's 142M MERGE) can't leave the JVM
 # heap-pressured for the next one (Gold OOM'd the shared 4g driver this way). Each
@@ -256,6 +261,43 @@ def run_optimize(table="silver", path=None):
         if table == "silver":
             m["silver_version"] = table_version(spark, path)   # OPTIMIZE commits a new version
         print(f"OPTIMIZE {table}: {m['reason']}")
+        return m
+    finally:
+        spark.stop()
+
+
+# ---------------------------------------------------------------- VACUUM (maintenance)
+def vacuum_table(spark, path, retain_hours=24):
+    """Delete data files no longer referenced by the current snapshot and older than
+    retain_hours. The active snapshot is untouched; only stale version files go. Reports
+    the whole on-disk footprint before and after (the real reclaim) against the unchanged
+    active snapshot. Caller must disable the short-retention safety check for < 168 hours."""
+    files_active, bytes_active = table_detail(spark, path)
+    on_disk_before = _dir_bytes_all(path)
+    DeltaTable.forPath(spark, str(path)).vacuum(retain_hours)
+    on_disk_after = _dir_bytes_all(path)
+    reclaimed = max(on_disk_before - on_disk_after, 0)
+    reason = (f"VACUUM RETAIN {retain_hours} HOURS: on-disk "
+              f"{on_disk_before / 1e6:.1f}MB -> {on_disk_after / 1e6:.1f}MB "
+              f"(reclaimed {reclaimed / 1e6:.1f}MB); active {files_active} files / "
+              f"{bytes_active / 1e6:.1f}MB unchanged")
+    return {"files_before": files_active, "files_after": files_active,
+            "bytes_before": on_disk_before, "bytes_after": on_disk_after,
+            "on_disk_reclaimed_bytes": reclaimed, "reason": reason}
+
+
+def run_vacuum(table, path=None, retain_hours=24):
+    """VACUUM one Delta table in its own SparkSession, with retentionDurationCheck
+    disabled only here so it never leaks into a pipeline run. Returns a run_metrics
+    dict (stage='vacuum:<table>') and prints the reclaim report."""
+    path = config.LAKE[table] if path is None else path
+    spark = get_spark(app_name=f"vantage-vacuum-{table}".replace("/", "-"))
+    try:
+        # a short retention normally raises; this table's old versions are disposable
+        # housekeeping, not time-travel we keep, so bypass the guard for this session only
+        spark.conf.set("spark.databricks.delta.retentionDurationCheck.enabled", "false")
+        m = vacuum_table(spark, path, retain_hours)
+        print(f"VACUUM {table}: {m['reason']}")
         return m
     finally:
         spark.stop()
