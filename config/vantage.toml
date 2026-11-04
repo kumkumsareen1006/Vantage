@@ -42,6 +42,21 @@ min_jump = 1000
 desktop_share_min = 0.8
 isolation_ratio = 0.05
 
+[kafka]
+# Phase 2 streaming. Broker runs in Docker (docker-compose.yml); clients run in the venv.
+bootstrap_servers = "localhost:9092"
+topic = "recentchange"
+# 3 partitions so Spark can read with up to 3 parallel tasks and we can grow to a
+# 3-broker cluster later without re-partitioning. Key = event title (set by the
+# producer), so all edits to one page land on the same partition, in order.
+partitions = 3
+replication_factor = 1
+# A page's edit history stays replayable for two weeks.
+retention_days = 14
+# Hard disk backstop, per partition: Kafka deletes the oldest segments past this.
+# 3 partitions x 1 GiB = 3 GiB max on disk even if retention_days is never reached.
+retention_bytes = 1073741824
+
 [paths]
 # All paths are relative to the project root.
 raw_pageviews = "data/raw/pageviews"

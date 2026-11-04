@@ -27,6 +27,11 @@ DESKTOP_SHARE_MIN = CONFIG["spikes"]["desktop_share_min"]
 ISOLATION_RATIO = CONFIG["spikes"]["isolation_ratio"]
 
 
+KAFKA = CONFIG["kafka"]
+KAFKA_BOOTSTRAP = KAFKA["bootstrap_servers"]
+KAFKA_TOPIC = KAFKA["topic"]
+
+
 def _abs(rel: str) -> Path:
     return (ROOT / rel).resolve()
 
