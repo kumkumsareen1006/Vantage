@@ -21,34 +21,15 @@ Exit code 0 on pass, 1 on fail. Run from the project root with the broker up.
 """
 import json
 import sys
-import uuid
 from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from confluent_kafka import Consumer, TopicPartition
-
 from vantage import config
 from vantage.ingest.stream_bronze import bronze_offset_stats, contiguity_report
 from vantage.spark import get_spark
-
-
-def kafka_watermarks(bootstrap, topic):
-    """(earliest, latest) offset per partition. latest is the next offset to be
-    written, so the last written offset is latest - 1."""
-    c = Consumer({"bootstrap.servers": bootstrap,
-                  "group.id": f"vantage-check-{uuid.uuid4().hex[:8]}",
-                  "enable.auto.commit": False})
-    try:
-        md = c.list_topics(topic, timeout=10)
-        out = {}
-        for p in sorted(md.topics[topic].partitions):
-            low, high = c.get_watermark_offsets(TopicPartition(topic, p), timeout=10, cached=False)
-            out[p] = (low, high)
-        return out
-    finally:
-        c.close()
+from vantage.validate.stream_metrics import kafka_watermarks
 
 
 def published_by_partition(path):

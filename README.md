@@ -2,19 +2,22 @@
 
 [![tests](https://github.com/kumkumsareen1006/Vantage/actions/workflows/tests.yml/badge.svg)](https://github.com/kumkumsareen1006/Vantage/actions/workflows/tests.yml)
 
-A Spark + Delta Lake pipeline over English Wikipedia pageviews. Phase 1 answers
+A Spark + Delta Lake pipeline over English Wikipedia pageviews and edits. Together,
+Phase 1 and Phase 2 now answer the full question this project was built toward:
 which articles suddenly drew unusual attention in a given hour — a spike of views
-larger than their own recent history explains — and which of those spikes look
-automated rather than driven by real readers. The fuller question this project is
-built toward, whether people were editing those same articles at the same time,
-needs the live edit stream, which arrives in Phase 2. Phase 1 reads the raw hourly
-pageview dumps, cleans and aggregates them through medallion layers, and scores
-each (title, hour) against a 24-hour baseline. The automated-traffic flag is a
-heuristic: a desktop-only, single-hour burst is a strong signal of scraper or
-redirect traffic, not a verified label.
+larger than their own recent history explains — which of those spikes look automated
+rather than driven by real readers, and whether people were editing those same
+articles at the same time. Phase 1 reads the raw hourly pageview dumps, cleans and
+aggregates them through medallion layers, and scores each (title, hour) against a
+24-hour baseline. The automated-traffic flag is a heuristic: a desktop-only,
+single-hour burst is a strong signal of scraper or redirect traffic, not a verified
+label.
 
-This is Phase 1: a local batch lakehouse. Phase 2 (streaming) and Phase 3
-(cloud) are [planned](#roadmap).
+Phase 1 is a local batch lakehouse over the pageview dumps. **Phase 2 adds the live
+edit stream** — the Wikimedia recent-changes feed through Kafka and Spark Structured
+Streaming into the same medallion layers, then joined to the pageview spikes to show
+which surges of attention were matched by a surge of human editing. Phase 3 (cloud) is
+[planned](#roadmap).
 
 ## Architecture
 
@@ -24,8 +27,19 @@ flowchart LR
     B["<b>Bronze</b> (Delta)<br/>append-only, scope-filtered"] --> S
     S["<b>Silver</b> (Delta)<br/>cleaned, unique by<br/>(project, title, hour)"] --> G
     S -. bad rows .-> Q["<b>Quarantine</b> (Delta)<br/>raw line + reason"]
-    G["<b>Gold</b> (Delta)<br/>top pages + spike scores"]
+
+    W["Wikimedia recent-changes<br/>(server-sent events)"] --> P["<b>Producer</b><br/>idempotent, resumes<br/>from Last-Event-ID"]
+    P --> K["<b>Kafka</b><br/>recentchange, 3 partitions"]
+    K --> BE["<b>Bronze edits</b> (Delta)<br/>append-only, gapless offsets"]
+    BE --> SE["<b>Silver edits</b> (Delta)<br/>unique by meta.id,<br/>usernames hashed"]
+    SE -. bad rows .-> QE["<b>Quarantine edits</b> (Delta)<br/>raw value + reason"]
+    SE --> G
+    G["<b>Gold</b> (Delta)<br/>view spikes +<br/>edit co-spikes"]
 ```
+
+The top lane is Phase 1 (batch). The bottom lane is Phase 2 (streaming): the live edit
+feed is produced to Kafka and streamed through its own Bronze and Silver, then joined
+into Gold where a view spike and a human-edit spike in the same hour become a co-spike.
 
 - **Bronze** — every in-scope raw line landed exactly as read, one file per hour,
   appended and never rewritten. Re-landing a file is a no-op, so the ingest is
@@ -37,9 +51,10 @@ flowchart LR
 - **Quarantine** — any row that fails to parse or validate is kept here with its
   raw text and a reason, never dropped silently and never allowed to crash the
   run. Reprocessing a file clears its old quarantine rows first.
-- **Gold** — `top_pages_hourly`, `top_pages_daily`, and `spikes` (the z-score
-  table). Each is a pure function of Silver, overwritten every build, so it can't
-  accumulate or drift; a build is skipped entirely when Silver hasn't changed.
+- **Gold** — `top_pages_hourly`, `top_pages_daily`, `spikes` (the z-score table),
+  and `co_spikes` (a view spike and a human-edit spike in the same hour). Each is a
+  pure function of Silver, overwritten every build, so it can't accumulate or drift;
+  a build is skipped entirely when Silver hasn't changed.
 
 The full set of filters, drops, and thresholds each layer applies is written up
 as an exact spec in [docs/cleaning-rules.md](docs/cleaning-rules.md).
@@ -203,6 +218,196 @@ Spark.
   `ISOLATION_RATIO = 0.05`), not a verified classification. It's a label to
   filter or inspect by, deliberately kept separate from `is_spike`.
 
+## Phase 2 — streaming the edit feed
+
+Phase 2 brings in the second feed: Wikimedia's live recent-changes stream. Every edit
+to English Wikipedia is produced to Kafka, streamed through its own Bronze and Silver
+Delta tables, and joined into Gold so a spike of **views** and a spike of human **edits**
+in the same hour can be read off together. The hard requirement is that it survives a
+crash — the streaming pipeline must not lose or double-count an edit when a process dies
+— which the [restart test](docs/restart-test.md) proves on purpose.
+
+### The producer
+
+`vantage/ingest/producer.py` reads the recent-changes server-sent-event stream (English
+Wikipedia only) and publishes each event's raw JSON, keyed by title, to the Kafka
+`recentchange` topic. Two settings make it safe to crash and restart:
+
+- **Kafka idempotence on** (`enable.idempotence=true`, `acks=all`), so a producer
+  retry can't write the same event to the topic twice.
+- **Resume from `Last-Event-ID`.** On reconnect the producer sends the last event id it
+  durably recorded, so the feed resumes instead of starting over. The resume id is saved
+  **only after `flush()` confirms** the events ahead of it reached Kafka, so a crash
+  re-reads a few events (at-least-once from the source) rather than skipping any. Every
+  confirmed delivery is logged to `data/stream/published.jsonl` as
+  `{meta_id, partition, offset}` — the ground truth the restart test checks against.
+
+A 30-minute validation run published **9,970 events = 9,970 confirmed deliveries =
+9,970 messages in the topic** (0 failed), surviving 3 reconnects with 0 loss and 0
+duplicates.<sup>[a]</sup>
+
+### Bronze and Silver streams, and what each guarantees
+
+- **Bronze edits** is Spark Structured Streaming from Kafka into an append-only Delta
+  table, raw message value plus Kafka metadata (topic, partition, offset, timestamp). Its
+  guarantee is *no gaps*: every Kafka `(partition, offset)` lands exactly once, contiguous
+  from 0. That comes from the streaming **checkpoint**, which records the offsets each
+  micro-batch committed, so a restart resumes at the exact offset it stopped at — no
+  re-read, no skip. `failOnDataLoss` is left **on**: if offsets Bronze still needs have
+  aged out of Kafka, the stream fails loudly rather than silently skipping a gap.
+- **Silver edits** parses each Bronze value against an explicit schema and its guarantee
+  is *unique by `meta.id`*. It keeps **all** event types and namespaces (the
+  `edit`/`new` + namespace-0 filter is applied later, in the Gold join), so the restart
+  test can compare Silver's id set against every id the producer logged. Malformed events
+  go to a quarantine table with a reason, never dropped silently.
+
+### Two dedup layers, and why the watermark uses `kafka_timestamp`
+
+Upstream duplicates are real: after a reconnect the producer replays recent events, so
+the *same* `meta.id` arrives again at a *new* Kafka offset. Silver removes them in two
+layers:
+
+1. **`dropDuplicatesWithinWatermark` on `meta.id`**, with a **2-hour** watermark on
+   **`kafka_timestamp` (when we ingested the event), not `meta.dt` (when the edit
+   happened)**. This matters: after an outage the replayed events carry an *old*
+   `meta.dt`, so a `meta.dt` watermark would judge the replay "late" and silently drop
+   it — data loss. `kafka_timestamp` is current for a replay, so the duplicate stays
+   inside the watermark and is deduped, never dropped. The 2-hour delay bounds the
+   in-stream state and covers a producer reconnect-and-replay window; a duplicate that
+   arrives more than 2 hours after the original falls outside the watermark and is
+   caught instead by layer 2's MERGE.
+2. **An insert-only MERGE** (`foreachBatch`) that inserts a `meta.id` only when it isn't
+   already present. This is the actual uniqueness guarantee — it holds across all Silver
+   history, not just the watermark window — and makes a retried micro-batch a no-op.
+
+### Username hashing
+
+Silver never stores a plaintext username. The `user` field is replaced by
+`user_hash = SHA-256(salt + username)`; the salt lives **outside the repo**
+(`$VANTAGE_USER_SALT` or `~/.config/vantage/user_salt`) and is never logged. Silver
+**refuses to run** if the salt is missing, so it can't quietly fall back to unsalted or
+empty-salt hashes. The raw `user`, `comment`, `parsedcomment` and `log_*` fields are
+never carried past the parse.
+
+### The restart test
+
+[docs/restart-test.md](docs/restart-test.md) crashes the stream and the producer on
+purpose and checks three invariants against the producer's delivery log. On the
+2026-11-05 run the stream was **`kill -9`'d mid-batch** (04:09:13 UTC, on Bronze
+batch 36 / Silver batch 11) to test checkpoint recovery, and later the producer was
+**`kill -9`'d and restarted** (04:19:28 UTC) to force an upstream replay. The results:
+Bronze held **53,488** rows, every `(partition, offset)` once and contiguous from 0 on
+all three partitions; Silver held **53,480** rows, exactly the 53,480 distinct logged
+ids (**0 lost, 0 duplicates**); and the producer's post-restart replay created upstream
+duplicates that Silver absorbed — **8 duplicate Bronze rows collapsed to the 53,480
+distinct events**. All three checks pass.<sup>[b]</sup>
+
+### Monitoring and schema drift
+
+`scripts/stream_all.py` writes one `run_metrics` row per stream stage per run (not per
+micro-batch) — `stream:bronze` and `stream:silver` — with throughput from each query's
+progress, Kafka consumer lag, and Silver freshness. A representative ~5-minute live
+run:<sup>[c]</sup>
+
+| | rows in | input rows/s | processed rows/s | batch ms | Kafka lag (p0/p1/p2) | freshness |
+|---|---|---|---|---|---|---|
+| `stream:bronze` | 1,474 (11 batches) | 4.2 | 65.9 | 2,236 | 25 / 29 / 34 = **88** | — |
+| `stream:silver` | 1,350 (10 batches) | 7.7 | 43.3 | 3,227 | — | **53 s** |
+
+Where each number comes from: *rows in, input/processed rows per second* and *batch ms*
+are aggregated from the StreamingQuery's own progress reports (mean over non-empty
+batches); *Kafka lag* is the broker's latest offset minus what Bronze committed, per
+partition (a small positive lag is the normal unread tail while the producer keeps
+publishing, not loss); *freshness* is `now −` the newest edit time in Silver. Kafka lag
+is recorded on the Bronze stage (the Kafka consumer); freshness on the Silver stage
+(where edit time exists).
+
+Schema drift is handled two ways, on purpose:
+
+- **An unknown field is ignored but counted.** The parse keeps only the fields Silver
+  uses, so a new feed field is skipped — and Bronze still holds the whole raw JSON. On
+  top of that the stream compares each event's keys against the known field set, counts
+  any event carrying extras, logs a `schema_drift` warning naming the new fields, and
+  records a `drift_events` count in `run_metrics`.
+- **A wrong-type required field is quarantined.** A value that is valid JSON but doesn't
+  fit the schema (e.g. `namespace` arriving as the string `"0"`) is quarantined as
+  `schema_mismatch`, told apart from a genuinely unparseable line (`bad_json`). All three
+  cases are covered by `tests/test_schema_drift.py`.<sup>[d]</sup>
+
+### Backfill and the `source` column
+
+The producer went live on 2026-11-05, but the pageview Silver covers **2026-10-15 to
+2026-10-18**. To give the Gold join overlapping hours, the recent-changes events captured
+for that October window are backfilled through the *same* Silver code
+(`scripts/backfill_edits.py`) — same schema, quarantine, title normalization, username
+hashing and insert-only MERGE on `meta.id`. A `source` column tags where each row came
+from: `capture` for the backfilled October edits, `kafka` for the live stream. The
+backfill inserted **945,776** capture rows with **0 quarantined**.<sup>[e]</sup> The
+`source` column is what lets the restart test and the live freshness metric look at only
+the streamed rows, and keeps the historical backfill from being mistaken for live data.
+
+### Co-spike results
+
+Gold's `co_spikes` table joins the pageview spikes to per-hour human-edit counts on
+normalized title + UTC hour. Over the October window it scored **76,848** `(title, hour)`
+rows: **2,027** view spikes, **40** human-edit spikes, and **27 co-spikes** (both in the
+same hour) across **16 titles**.<sup>[f]</sup> The edit-spike z-score uses **human edits
+only** — bot edits never enter it — so a page edited only by bots can't produce an
+edit spike and therefore **can't co-spike**.
+
+- The co-spikes are dominated by **`Katie_Zacharia`**, which co-spiked five hours running
+  on 2026-10-16 (peaking at **125,379 views with 42 human edits** at 18:00).
+- **`2026_Silver_Rail_Elementary_School_shooting`** — **8,382 views, 32 human edits** at
+  2026-10-16 00:00 → `co_spike = true`.
+- **`Ying`** — the window's largest view spike, **886,853 views** at 2026-10-17 17:00, but
+  **0 edits** → `edit_spike = false`, so `co_spike = false`. Attention without editing is
+  exactly what a co-spike should *not* flag.
+
+### Phase 2 results
+
+| Metric | Value | Source |
+|---|---|---|
+| Producer 30-min validation: published / confirmed / in topic | 9,970 / 9,970 / 9,970, 0 failed, 3 reconnects, 0 loss, 0 dup | [a] |
+| Restart test — Bronze rows, all `(partition, offset)` once & contiguous | 53,488 (p0 16,548 / p1 18,958 / p2 17,982) | [b] |
+| Restart test — Silver rows = distinct logged ids (0 lost) | 53,480 = 53,480 | [b] |
+| Restart test — upstream duplicates Silver removed | 8 | [b] |
+| Backfilled capture rows into Silver edits / quarantined | 945,776 / 0 | [e] |
+| Silver edits by source at backfill (capture + kafka) | 999,256 = 945,776 + 53,480 | [e] |
+| Gold co-spikes: scored rows / view spikes / edit spikes / co-spikes / titles | 76,848 / 2,027 / 40 / 27 / 16 | [f] |
+| Live run (~5 min): Bronze rows in / Kafka lag / Silver freshness | 1,474 / 88 / 53 s | [c] |
+| Schema-drift events in that run | 0 | [c] |
+| Tests | 93 passed | [g] |
+
+<sub>
+
+**Sources.** [a] Day 13 producer validation run: the confirmed-delivery log
+`data/stream/published.jsonl` (one `{meta_id, partition, offset}` line per confirmed
+delivery; its first 9,970 lines split p0 3,165 / p1 3,796 / p2 3,009) and the producer's
+run summary in `logs/producer.jsonl` (published 9,970 / confirmed 9,970 / failed 0 /
+3 reconnects). [b] [docs/restart-test.md](docs/restart-test.md),
+run 2026-11-05 (`scripts/restart_test.py`, all three checks PASS). [c] `run_metrics` rows
+`stage = stream:bronze` / `stream:silver`, `mode = continuous`, from a ~5-minute
+`scripts/stream_all.py` run on 2026-11-05 (297.5 s). [d] `tests/test_schema_drift.py`
+(unknown field kept + counted; wrong-type `namespace` → `schema_mismatch`; missing
+required field → quarantine). [e] `scripts/backfill_edits.py` run output (rows inserted,
+0 quarantined) and a `GROUP BY source` on `silver_edits` at that point. [f] `count()`
+and filters on `gold/co_spikes` (`scripts/build_co_spikes.py`); thresholds
+`z_min = 6`, `edits_floor = 10`, `min_jump = 10`. [g] `pytest -q`, 93 passed locally.
+
+</sub>
+
+### Honest limits (Phase 2)
+
+- **One laptop, one broker.** Kafka runs as a single broker with **replication factor 1**,
+  so there is no failover; a lost broker volume would lose unconsumed messages. That is a
+  deliberate local-scope choice, documented, not a production topology.
+- **The edit history has a 21-hour gap on 2026-10-26 to 10-27**, when the capture was
+  down. It falls outside the Gold join window and so doesn't affect the current results,
+  but it's a real gap in the recorded feed.
+- **Edits are joined only on the 2026-10-15 to 10-18 window so far.** That's the window
+  the pageview Silver covers and the October edits were backfilled for; the live stream
+  (November) accumulates for a future, wider join rather than being joined to views yet.
+
 ## How to run
 
 Requires **Python 3.11** and **Java 17**. Spark 3.5 supports Java 8, 11 and 17.
@@ -215,7 +420,7 @@ export JAVA_HOME=/opt/homebrew/opt/openjdk@17    # macOS/Homebrew; adjust for yo
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-pytest -q                                        # 58 tests
+pytest -q                                        # 93 tests
 
 # batch pipeline: bronze -> silver -> gold, one run_id, run_metrics row per stage
 python scripts/run_pipeline.py --start 2026-10-15T00 --end 2026-10-18T00
@@ -230,14 +435,32 @@ A failed stage stops the run, marks the rest skipped, and exits non-zero. Each
 run writes one JSON line per stage to `logs/pipeline.jsonl` and one row per stage
 to the `run_metrics` Delta table.
 
+The streaming side needs the Kafka broker up and the username salt set:
+
+```bash
+docker compose up -d                             # single-broker Kafka (KRaft)
+export VANTAGE_USER_SALT=...                      # or ~/.config/vantage/user_salt
+
+python scripts/produce_edits.py                  # live recent-changes -> Kafka (its own tab)
+
+# Kafka -> Bronze edits -> Silver edits, both queries in one driver
+python scripts/stream_all.py                     # continuous, until Ctrl-C (clean stop)
+python scripts/stream_all.py --once              # drain what's available, then stop
+# each run writes stream:bronze / stream:silver rows to run_metrics
+
+python scripts/restart_test.py                   # the three restart invariants (exit 0 = pass)
+python scripts/build_co_spikes.py                # rebuild Gold co_spikes
+```
+
 ## Roadmap
 
 - **Phase 1 — batch lakehouse (this repo).** Pageviews → Bronze → Silver → Gold
   on local Delta, with CI. Done.
-- **Phase 2 — streaming (planned).** The live recent-changes edit stream, already
-  being captured, fed through Kafka and Spark Structured Streaming into the same
-  medallion layers, then joined to pageviews on normalized title + UTC hour to add
-  an edit-spike signal.
+- **Phase 2 — streaming. Done.** The live recent-changes edit stream fed through Kafka
+  and Spark Structured Streaming into its own Bronze and Silver, deduped and privacy-hashed,
+  surviving a [restart test](docs/restart-test.md), and joined to the pageview spikes on
+  normalized title + UTC hour to add the edit co-spike signal — with stream metrics and
+  schema-drift handling in `run_metrics`. See [Phase 2 — streaming the edit feed](#phase-2--streaming-the-edit-feed).
 - **Phase 3 — cloud (planned, optional).** Run the same pipeline on Azure (ADLS
   Gen2 storage, Databricks, Data Factory) and confirm the row counts match the
   local run.

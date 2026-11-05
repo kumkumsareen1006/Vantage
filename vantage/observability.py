@@ -61,6 +61,9 @@ class RunLogger:
     def event(self, event, **fields):
         self._emit(logging.INFO, event, fields)
 
+    def warning(self, event, **fields):
+        self._emit(logging.WARNING, event, fields)
+
     def stage(self, stage, status, **fields):
         level = logging.ERROR if status == "failed" else logging.INFO
         self._emit(level, f"stage_{status}", {"stage": stage, "status": status, **fields})

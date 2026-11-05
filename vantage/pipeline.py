@@ -356,6 +356,44 @@ def write_run_metrics(spark, rows, metrics_path):
      .write.format("delta").mode("append").option("mergeSchema", "true").save(str(metrics_path)))
 
 
+# ---------------------------------------------------------------- streaming run_metrics
+# One row per stream stage per run (stream:bronze, stream:silver), not per micro-batch.
+# The shared columns (run_id, stage, timings, rows_*, status) match RUN_METRICS_SCHEMA;
+# the stream-only columns below are added to the same run_metrics table via mergeSchema,
+# so batch rows simply carry null for them. See vantage/validate/stream_metrics.py and
+# scripts/stream_all.py for where each number comes from.
+_STREAM_METRIC_FIELDS = ["run_id", "stage", "started_at", "finished_at", "seconds", "status",
+                         "mode", "rows_in", "rows_out", "rows_quarantined", "batches",
+                         "input_rows_per_sec", "processed_rows_per_sec", "batch_duration_ms",
+                         "kafka_lag", "freshness_seconds", "drift_events"]
+
+STREAM_METRICS_SCHEMA = StructType([
+    StructField("run_id", StringType()),
+    StructField("stage", StringType()),
+    StructField("started_at", TimestampType()),
+    StructField("finished_at", TimestampType()),
+    StructField("seconds", DoubleType()),
+    StructField("status", StringType()),
+    StructField("mode", StringType()),
+    StructField("rows_in", LongType()),
+    StructField("rows_out", LongType()),
+    StructField("rows_quarantined", LongType()),
+    StructField("batches", LongType()),
+    StructField("input_rows_per_sec", DoubleType()),
+    StructField("processed_rows_per_sec", DoubleType()),
+    StructField("batch_duration_ms", DoubleType()),
+    StructField("kafka_lag", StringType()),          # per-partition JSON (stream:bronze)
+    StructField("freshness_seconds", DoubleType()),  # stream:silver
+    StructField("drift_events", LongType()),         # stream:silver
+])
+
+
+def write_stream_metrics(spark, rows, metrics_path):
+    data = [tuple(r.get(f) for f in _STREAM_METRIC_FIELDS) for r in rows]
+    (spark.createDataFrame(data, schema=STREAM_METRICS_SCHEMA)
+     .write.format("delta").mode("append").option("mergeSchema", "true").save(str(metrics_path)))
+
+
 def execute_pipeline(stages, run_id, rlog, metrics_writer):
     """Run stages in order under one run_id. On the first failure the remaining
     stages are marked skipped and never invoked; one run_metrics row is collected

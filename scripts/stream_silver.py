@@ -49,13 +49,17 @@ def main(argv):
                bronze=str(bronze), silver=str(silver), quarantine=str(quar),
                checkpoint=str(checkpoint), interval=(None if args.once else args.interval))
 
-    totals = {"batches": 0, "clean_in": 0, "inserted": 0, "quar_in": 0, "quar_inserted": 0}
+    totals = {"batches": 0, "clean_in": 0, "inserted": 0, "quar_in": 0,
+              "quar_inserted": 0, "drift_events": 0}
 
     def on_batch(batch_df, batch_id):
         stats = process_batch(batch_df, silver, quar)
         totals["batches"] += 1
-        for k in ("clean_in", "inserted", "quar_in", "quar_inserted"):
+        for k in ("clean_in", "inserted", "quar_in", "quar_inserted", "drift_events"):
             totals[k] += stats[k]
+        if stats["drift_events"]:
+            rlog.warning("schema_drift", batch_id=batch_id,
+                         drift_events=stats["drift_events"], new_fields=stats["drift_fields"])
         rlog.event("silver_batch", batch_id=batch_id, **stats,
                    layer_b_removed=stats["clean_in"] - stats["inserted"])
 

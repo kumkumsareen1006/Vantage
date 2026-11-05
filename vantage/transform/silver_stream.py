@@ -94,6 +94,16 @@ SILVER_COLUMNS = ["meta_id", "event_time", "hour", "type", "namespace", "title",
 
 QUARANTINE_COLUMNS = ["value", "partition", "offset", "reason", "kafka_timestamp", "source"]
 
+# Every top-level field a recentchange event normally carries (confirmed as the exact
+# union of keys across all captured and all streamed events). A field outside this set is
+# schema drift: the feed added something. Parsing ignores it -- RECENTCHANGE_SCHEMA keeps
+# only the subset we use -- but drift_fields flags it so we can see the feed change.
+KNOWN_FIELDS = ["$schema", "meta", "id", "type", "namespace", "title", "title_url",
+                "comment", "parsedcomment", "timestamp", "user", "bot", "notify_url",
+                "minor", "patrolled", "length", "revision", "server_url", "server_name",
+                "server_script_path", "wiki", "log_id", "log_type", "log_params",
+                "log_action", "log_action_comment"]
+
 
 def parse_and_annotate(df, salt, source="kafka"):
     """Bronze rows (value, partition, offset, kafka_timestamp) -> every Silver column
@@ -122,8 +132,19 @@ def parse_and_annotate(df, salt, source="kafka"):
           .withColumn("length_old", F.col("_e.length.old"))
           .withColumn("length_new", F.col("_e.length.new"))
           .withColumn("source", F.lit(source))
+          # top-level fields not in the known recentchange set -- null for a non-object
+          # (bad_json), so drift never counts an unparseable line.
+          .withColumn("drift_fields", F.array_except(
+              F.expr("json_object_keys(value)"),
+              F.array(*[F.lit(k) for k in KNOWN_FIELDS])))
           .withColumn("reason", F.coalesce(
-              F.when(F.col(f"_e.{_CORRUPT}").isNotNull(), F.lit("bad_json")),
+              # _corrupt is set both for unparseable JSON and for valid JSON that doesn't
+              # fit the schema (a field with the wrong type, e.g. namespace as a string).
+              # json_object_keys is null only when the value isn't a JSON object at all,
+              # which separates a genuinely bad line from a schema mismatch.
+              F.when(F.col(f"_e.{_CORRUPT}").isNotNull()
+                     & F.expr("json_object_keys(value) IS NULL"), F.lit("bad_json")),
+              F.when(F.col(f"_e.{_CORRUPT}").isNotNull(), F.lit("schema_mismatch")),
               F.when(F.col("_e.meta.id").isNull(), F.lit("missing_meta_id")),
               F.when(event_time.isNull(), F.lit("bad_meta_dt")),
               F.when(title.isNull() | (F.trim(title) == ""), F.lit("empty_title")),
@@ -218,6 +239,15 @@ def process_batch(batch_df, silver_path, quar_path):
         quar = batch_df.where(F.col("reason").isNotNull())
         clean_in, quar_in = clean.count(), quar.count()
 
+        # schema drift: events carrying fields outside the known set. Parsing ignored them,
+        # so these are mostly clean rows still bound for Silver; we count them and list the
+        # new field names so the caller can warn and track a drift count in run_metrics.
+        drift = batch_df.where(F.size("drift_fields") > 0)
+        drift_events = drift.count()
+        drift_fields = (sorted({r["f"] for r in
+                                drift.select(F.explode("drift_fields").alias("f")).distinct().collect()})
+                        if drift_events else [])
+
         sv0 = table_version(spark, silver_path)
         merge_silver(clean, silver_path)
         inserted = rows_written_since(spark, silver_path, sv0)
@@ -228,6 +258,7 @@ def process_batch(batch_df, silver_path, quar_path):
             merge_quarantine(quar, quar_path)
             quar_inserted = rows_written_since(spark, quar_path, qv0)
         return {"clean_in": clean_in, "inserted": inserted,
-                "quar_in": quar_in, "quar_inserted": quar_inserted}
+                "quar_in": quar_in, "quar_inserted": quar_inserted,
+                "drift_events": drift_events, "drift_fields": drift_fields}
     finally:
         batch_df.unpersist()

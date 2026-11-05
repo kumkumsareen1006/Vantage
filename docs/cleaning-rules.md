@@ -115,9 +115,29 @@ a different, wider set of rows:
   The salt lives outside the repo (`$VANTAGE_USER_SALT` or `~/.config/vantage/user_salt`)
   and is never logged; Silver refuses to run if it is missing. The raw `user`,
   `comment`, `parsedcomment` and `log_*` fields are never written to Silver.
-- **Quarantine** uses the same four reasons (`bad_json`, `missing_meta_id`,
-  `bad_meta_dt`, `empty_title`) and keeps the raw message value with its Kafka
-  partition and offset.
+- **Quarantine** uses the four shared reasons (`bad_json`, `missing_meta_id`,
+  `bad_meta_dt`, `empty_title`) plus `schema_mismatch` (see schema drift below) and
+  keeps the raw message value with its Kafka partition and offset.
+
+### Schema drift (Phase 2, Day 18)
+
+The recentchange feed can change shape. Two kinds of change are handled on purpose:
+
+- **An unknown field is ignored, not dropped silently.** `RECENTCHANGE_SCHEMA` keeps
+  only the subset Silver uses, so `from_json` simply skips any field outside it — and
+  Bronze still holds the whole raw JSON, so nothing is lost. On top of that, the parse
+  compares each event's top-level keys against the known field set (`KNOWN_FIELDS`, the
+  exact union of keys seen across every captured and streamed event) and records the
+  extras in a `drift_fields` column. The Silver stream counts the events carrying extras,
+  logs a `schema_drift` warning listing the new field names, and writes the per-run count
+  to `run_metrics` (`drift_events`). Drift is a signal to look, not a failure: the row
+  is still clean and still reaches Silver.
+- **A required field with the wrong type is quarantined.** A value that is valid JSON but
+  doesn't fit the schema — e.g. `namespace` arriving as the string `"0"` instead of an
+  integer — makes `from_json` reject the whole record. That is told apart from a genuinely
+  unparseable line (which can't report any keys) and quarantined as `schema_mismatch`,
+  distinct from `bad_json`. A required field that is simply missing still quarantines under
+  its existing reason (`missing_meta_id`, `bad_meta_dt`, `empty_title`).
 
 ## Spike score
 
@@ -208,7 +228,8 @@ with its raw line and a reason.
 | Pageviews | `unbalanced_quote` | title opens a quote it never closes |
 | Pageviews | `bad_url_encoding` | percent escape decodes to invalid UTF-8 |
 | Pageviews | `empty_title` | title is empty after normalization |
-| Edits | `bad_json` | line is not valid JSON |
+| Edits | `bad_json` | line is not a JSON object at all |
+| Edits | `schema_mismatch` | valid JSON, but a field has the wrong type (e.g. `namespace` as a string) |
 | Edits | `missing_meta_id` | no `meta.id` to deduplicate on |
 | Edits | `bad_meta_dt` | `meta.dt` missing or unparseable |
 | Edits | `empty_title` | title is empty after normalization |
