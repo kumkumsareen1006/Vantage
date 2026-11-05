@@ -40,5 +40,8 @@ RAW_PAGEVIEWS = _abs(CONFIG["paths"]["raw_pageviews"])
 RAW_EDITS = _abs(CONFIG["paths"]["raw_edits"])
 INTERIM_PAGEVIEWS = _abs(CONFIG["paths"]["interim_pageviews"])
 
-# bronze / silver / gold / quarantine -> absolute paths
+# bronze / silver / gold / quarantine / bronze_edits -> absolute paths
 LAKE = {name: _abs(rel) for name, rel in CONFIG["lake"].items()}
+
+# Structured Streaming checkpoint locations -> absolute paths
+CHECKPOINTS = {name: _abs(rel) for name, rel in CONFIG.get("checkpoints", {}).items()}

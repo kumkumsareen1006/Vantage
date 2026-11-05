@@ -21,6 +21,10 @@ os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 DRIVER_MEMORY = "4g"
 # Tiny local data; Spark's default of 200 shuffle partitions just adds scheduler overhead.
 SHUFFLE_PARTITIONS = "8"
+# Spark 3.5.9's Structured Streaming Kafka source. _2.12 matches the bundled
+# scala-library; it pulls kafka-clients 3.4.1, which the 3.9.x broker speaks
+# (docs/kafka.md). Added next to the Delta jars so one session can do both.
+KAFKA_PACKAGE = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.9"
 
 
 def get_spark(app_name="vantage", master="local[*]", driver_memory=DRIVER_MEMORY):
@@ -36,6 +40,6 @@ def get_spark(app_name="vantage", master="local[*]", driver_memory=DRIVER_MEMORY
         .config("spark.driver.host", "localhost")
     )
     # configure_spark_with_delta_pip adds the delta-spark jars matching the installed pip version
-    spark = configure_spark_with_delta_pip(builder).getOrCreate()
+    spark = configure_spark_with_delta_pip(builder, extra_packages=[KAFKA_PACKAGE]).getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
     return spark
