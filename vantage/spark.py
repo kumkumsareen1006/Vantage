@@ -3,8 +3,18 @@
 One function so the pytest fixture, the parity test and any script all get an
 identically configured session.
 """
+import os
+import sys
+
 from pyspark.sql import SparkSession
 from delta import configure_spark_with_delta_pip
+
+# PySpark picks the worker interpreter from PYSPARK_PYTHON (defaulting to whatever
+# `python3` is on PATH), not from SparkConf -- so without the venv activated the
+# worker is a different Python than the driver and Spark aborts on the mismatch.
+# Pin both to this interpreter before any SparkContext is built.
+os.environ["PYSPARK_PYTHON"] = sys.executable
+os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 
 # 16 GB Mac, shared with the running edit capture and VS Code. 4g leaves headroom
 # for both plus macOS while giving the local driver enough for the batch job.
