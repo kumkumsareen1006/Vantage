@@ -10,6 +10,9 @@ services:
     # bundles kafka-clients 3.4.1, so broker and client stay on the same 3.x line.
     image: apache/kafka:3.9.2
     container_name: vantage-kafka
+    # come back automatically when Docker Desktop restarts; only a manual
+    # `docker compose stop/down` keeps it down
+    restart: unless-stopped
     ports:
       - "9092:9092"
     environment:
