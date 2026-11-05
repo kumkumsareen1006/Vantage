@@ -72,9 +72,14 @@ quarantine = "data/lake/quarantine"
 run_metrics = "data/lake/run_metrics"
 # Streaming edits Bronze (Phase 2, Day 14): raw Kafka messages + metadata, append-only.
 bronze_edits = "data/lake/bronze_edits"
+# Streaming edits Silver (Day 15): parsed, deduped-by-meta_id, usernames hashed.
+silver_edits = "data/lake/silver_edits"
+# Malformed edit events (Day 15): raw value + partition/offset + reason.
+quarantine_edits = "data/lake/quarantine_edits"
 
 [checkpoints]
 # Structured Streaming checkpoints (git-ignored under data/). The checkpoint is the
 # stream's offset bookkeeping: it records which Kafka offsets Bronze has committed,
 # so a restart resumes exactly where it left off.
 edits_bronze = "data/checkpoints/edits_bronze"
+edits_silver = "data/checkpoints/edits_silver"

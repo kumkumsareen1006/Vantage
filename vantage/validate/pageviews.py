@@ -20,6 +20,7 @@ from pyspark.sql.functions import pandas_udf
 
 from prototype.pageviews import _url_decode
 from vantage import config
+from vantage.normalize import normalize_title
 
 SILVER_SCHEMA = T.StructType([
     T.StructField("project", T.StringType()),
@@ -51,12 +52,6 @@ _PLACEHOLDERS = list(config.PLACEHOLDER_TITLES)
 @pandas_udf(T.StringType())
 def _url_decode_udf(s: pd.Series) -> pd.Series:
     return s.map(lambda t: _url_decode(t) if t is not None else None)
-
-
-def _normalize_title(col):
-    # trim both ends, spaces -> underscores, uppercase the first character only
-    t = F.regexp_replace(F.regexp_replace(col, r"^\s+|\s+$", ""), " ", "_")
-    return F.concat(F.upper(t.substr(F.lit(1), F.lit(1))), t.substr(F.lit(2), F.length(t)))
 
 
 def annotate_bronze(bronze):
@@ -105,7 +100,7 @@ def annotate_bronze(bronze):
              .withColumn("_decoded", F.lit(None).cast("string"))
              .withColumn("_failed", F.lit(False))
              .withColumn("_title1", F.col("_unquoted")))
-    surv = esc.unionByName(noesc).withColumn("_norm", _normalize_title(F.col("_title1")))
+    surv = esc.unionByName(noesc).withColumn("_norm", normalize_title(F.col("_title1")))
     surv = surv.withColumn("reason", F.coalesce(
         F.when(F.col("_failed"), F.lit("bad_url_encoding")),
         F.when(F.col("_norm").isNull() | (F.col("_norm") == ""), F.lit("empty_title")),

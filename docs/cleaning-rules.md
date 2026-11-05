@@ -91,6 +91,34 @@ date, so a window may span more than one file). Flattened with `json_normalize`.
 - Fields we do not use (user, comment, revision, …) are dropped; usernames are
   not carried past cleaning.
 
+### Streaming path (Phase 2 Silver)
+
+The rules above are the Phase 0 pandas cleaner over the captured JSONL. The Phase 2
+streaming Silver (Kafka → Bronze → Silver, Day 15) parses the same events but keeps
+a different, wider set of rows:
+
+- **Keeps all event types and all namespaces.** The streaming Silver does **not**
+  apply the `edit`/`new` + `namespace == 0` scope filter. The Day 16 restart test
+  checks Silver's `meta.id` set against every id the producer logged, so Silver must
+  hold one row per distinct event; the `edit`/`new` + namespace-0 filter is applied
+  later, in the Day 17 edits-to-views aggregation. Each row carries `type` and
+  `namespace` so that filter can run downstream.
+- **Dedup is two layers.** (a) `dropDuplicatesWithinWatermark` on `meta.id` with the
+  watermark on the **Kafka ingest time**, not `meta.dt`: after an outage the producer
+  replays old events, whose `meta.dt` is old, so a `meta.dt` watermark would mark the
+  replay "late" and drop it. (b) A `foreachBatch` MERGE that inserts a `meta.id` only
+  when not already present — the actual uniqueness guarantee (across all Silver
+  history, not just the watermark), and a no-op for a retried micro-batch.
+- **Title** is kept raw and normalized into `title_norm` with the same
+  trim / spaces-to-underscores / uppercase-first rule (no URL-decode).
+- **Privacy.** The username is replaced by `user_hash = SHA-256(salt + username)`.
+  The salt lives outside the repo (`$VANTAGE_USER_SALT` or `~/.config/vantage/user_salt`)
+  and is never logged; Silver refuses to run if it is missing. The raw `user`,
+  `comment`, `parsedcomment` and `log_*` fields are never written to Silver.
+- **Quarantine** uses the same four reasons (`bad_json`, `missing_meta_id`,
+  `bad_meta_dt`, `empty_title`) and keeps the raw message value with its Kafka
+  partition and offset.
+
 ## Spike score
 
 Per title, views are summed across `en` + `en.m` per hour; a title is kept only
