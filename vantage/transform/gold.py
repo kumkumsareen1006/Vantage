@@ -119,3 +119,83 @@ def spike_scores(silver, baseline=None, z_min=None, views_floor=None, min_jump=N
     return scored.select("title", "hour", "views", "en_views", "mobile_views",
                          "median", "mad", "z", "jump", "prev_views", "next_views",
                          "is_spike", "likely_automated")
+
+
+# --------------------------------------------------------------- edits -> Gold (Day 17)
+EDIT_TYPES = ("edit", "new")
+
+
+def edit_counts(silver_edits, window_start=None, window_end=None):
+    """Per (title, hour): human and bot edit counts. Only type in (edit, new) and
+    namespace 0 -- the actual-article-revision filter the streaming Silver deferred.
+    `title` is title_norm, so it joins the pageview spikes. bot missing -> counted human.
+    hour is already meta.dt truncated to the UTC hour in Silver."""
+    df = silver_edits.where(F.col("type").isin(*EDIT_TYPES) & (F.col("namespace") == 0))
+    if window_start is not None:
+        df = df.where((F.col("hour") >= F.lit(window_start)) & (F.col("hour") < F.lit(window_end)))
+    is_bot = F.coalesce(F.col("bot"), F.lit(False))
+    return (df.groupBy(F.col("title_norm").alias("title"), "hour")
+            .agg(F.sum(F.when(~is_bot, 1).otherwise(0)).cast("long").alias("human_edits"),
+                 F.sum(F.when(is_bot, 1).otherwise(0)).cast("long").alias("bot_edits")))
+
+
+def _edit_grid(counts, edits_floor):
+    """Zero-filled (title x hour) human/bot edits for titles that reach edits_floor human
+    edits at least once. Raises on an internal hour gap (don't fill across), like view_grid."""
+    hours = counts.select("hour").distinct()
+    axis = (hours.agg(F.min("hour").alias("lo"), F.max("hour").alias("hi"))
+            .select(F.explode(F.sequence("lo", "hi", F.expr("INTERVAL 1 HOUR"))).alias("hour")))
+    if axis.count() != hours.count():
+        raise ValueError("internal gap in edit hours; refusing to zero-fill across it")
+    kept = (counts.groupBy("title").agg(F.max("human_edits").alias("mx"))
+            .where(F.col("mx") >= F.lit(edits_floor)).select("title"))
+    return (kept.crossJoin(axis).join(counts, ["title", "hour"], "left")
+            .withColumn("human_edits", F.coalesce(F.col("human_edits"), F.lit(0)).cast("long"))
+            .withColumn("bot_edits", F.coalesce(F.col("bot_edits"), F.lit(0)).cast("long")))
+
+
+def edit_spike_scores(counts, baseline=None, z_min=None, edits_floor=None, min_jump=None):
+    """Robust z-score on human_edits, same shape as the view spike: previous `baseline`
+    hours (current excluded), max(MAD, 1), plus an edits floor and a minimum jump. Bot
+    edits never enter the score."""
+    baseline = config.EDIT_BASELINE_HOURS if baseline is None else baseline
+    z_min = config.EDIT_Z_MIN if z_min is None else z_min
+    edits_floor = config.EDITS_FLOOR if edits_floor is None else edits_floor
+    min_jump = config.EDIT_MIN_JUMP if min_jump is None else min_jump
+    lo_i, hi_i = baseline // 2 - 1, baseline // 2
+
+    grid = _edit_grid(counts, edits_floor)
+    w = Window.partitionBy("title").orderBy("hour").rowsBetween(-baseline, -1)
+    scored = grid.withColumn("base", F.collect_list("human_edits").over(w)).where(F.size("base") == baseline)
+
+    sarr = F.sort_array(F.col("base"))
+    scored = scored.withColumn("median", (sarr.getItem(lo_i) + sarr.getItem(hi_i)) / 2.0)
+    dev = F.sort_array(F.transform(F.col("base"), lambda x: F.abs(x - F.col("median"))))
+    scored = (scored
+              .withColumn("mad", (dev.getItem(lo_i) + dev.getItem(hi_i)) / 2.0)
+              .withColumn("jump", F.col("human_edits") - F.col("median"))
+              .withColumn("z_edit", (F.col("human_edits") - F.col("median"))
+                          / (F.lit(1.4826) * F.greatest(F.col("mad"), F.lit(1.0))))
+              .withColumn("edit_spike", (F.col("z_edit") >= F.lit(z_min))
+                          & (F.col("human_edits") >= F.lit(edits_floor))
+                          & (F.col("jump") >= F.lit(min_jump))))
+    return scored.select("title", "hour", "human_edits", "bot_edits", "edit_spike",
+                         "z_edit", "median", "mad", "jump")
+
+
+def co_spikes(spikes, counts, edit_spikes):
+    """Join the pageview spikes to the edit counts and edit spikes on (title, hour).
+    Driven by the spikes table (one row per scored pageview hour); edits left-join in,
+    missing -> 0 / false. co_spike = a view spike and an edit spike in the same hour."""
+    es = edit_spikes.select("title", "hour", "edit_spike")
+    base = spikes.select("title", "hour", "views", "en_views", "mobile_views",
+                         "is_spike", "likely_automated")
+    return (base.join(counts, ["title", "hour"], "left")
+            .join(es, ["title", "hour"], "left")
+            .withColumn("human_edits", F.coalesce(F.col("human_edits"), F.lit(0)).cast("long"))
+            .withColumn("bot_edits", F.coalesce(F.col("bot_edits"), F.lit(0)).cast("long"))
+            .withColumn("edit_spike", F.coalesce(F.col("edit_spike"), F.lit(False)))
+            .withColumn("co_spike", F.col("is_spike") & F.col("edit_spike"))
+            .select("title", "hour", "views", "en_views", "mobile_views",
+                    "human_edits", "bot_edits", "is_spike", "edit_spike", "co_spike",
+                    "likely_automated"))

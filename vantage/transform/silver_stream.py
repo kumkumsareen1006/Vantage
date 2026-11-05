@@ -90,15 +90,16 @@ RECENTCHANGE_SCHEMA = T.StructType([
 
 SILVER_COLUMNS = ["meta_id", "event_time", "hour", "type", "namespace", "title",
                   "title_norm", "wiki", "bot", "user_hash", "revision_old",
-                  "revision_new", "length_old", "length_new", "partition", "offset"]
+                  "revision_new", "length_old", "length_new", "partition", "offset", "source"]
 
-QUARANTINE_COLUMNS = ["value", "partition", "offset", "reason", "kafka_timestamp"]
+QUARANTINE_COLUMNS = ["value", "partition", "offset", "reason", "kafka_timestamp", "source"]
 
 
-def parse_and_annotate(df, salt):
+def parse_and_annotate(df, salt, source="kafka"):
     """Bronze rows (value, partition, offset, kafka_timestamp) -> every Silver column
     plus `reason` (null = clean) and `dedup_key`. Nothing is filtered here; the caller
-    splits on `reason`."""
+    splits on `reason`. `source` tags where the row came from: 'kafka' for the live
+    stream, 'capture' for the Day 17 JSONL backfill."""
     e = F.from_json(F.col("value"), RECENTCHANGE_SCHEMA,
                     {"columnNameOfCorruptRecord": _CORRUPT, "mode": "PERMISSIVE"})
     df = df.withColumn("_e", e)
@@ -120,6 +121,7 @@ def parse_and_annotate(df, salt):
           .withColumn("revision_new", F.col("_e.revision.new"))
           .withColumn("length_old", F.col("_e.length.old"))
           .withColumn("length_new", F.col("_e.length.new"))
+          .withColumn("source", F.lit(source))
           .withColumn("reason", F.coalesce(
               F.when(F.col(f"_e.{_CORRUPT}").isNotNull(), F.lit("bad_json")),
               F.when(F.col("_e.meta.id").isNull(), F.lit("missing_meta_id")),
@@ -178,6 +180,30 @@ def merge_quarantine(batch_df, path):
          .withColumn("quarantined_at", F.current_timestamp()))
     _merge_insert(q, path, "t.partition = s.partition AND t.offset = s.offset",
                   ["partition", "offset"])
+
+
+# --- batch backfill from the captured JSONL (Day 17) ---------------------------
+
+def read_capture(spark, paths):
+    """Captured recent-change JSONL -> the Bronze row shape parse_and_annotate expects.
+    Capture rows have no Kafka lineage, so partition/offset/kafka_timestamp are null."""
+    return (spark.read.text([str(p) for p in paths])
+            .withColumn("partition", F.lit(None).cast("int"))
+            .withColumn("offset", F.lit(None).cast("long"))
+            .withColumn("kafka_timestamp", F.lit(None).cast("timestamp")))
+
+
+def write_quarantine_batch(df, path, source):
+    """Idempotent per-source quarantine write for the batch backfill: overwrite only
+    this source's rows (replaceWhere), so a rerun replaces rather than appends. Capture
+    rows have null partition/offset, so the streaming (partition, offset) MERGE can't key
+    them -- scoping by source does."""
+    q = (df.select(*QUARANTINE_COLUMNS)
+         .withColumn("quarantined_at", F.current_timestamp()))
+    writer = q.write.format("delta").mode("overwrite").option("mergeSchema", "true")
+    if DeltaTable.isDeltaTable(df.sparkSession, str(path)):
+        writer = writer.option("replaceWhere", f"source = '{source}'")
+    writer.save(str(path))
 
 
 def process_batch(batch_df, silver_path, quar_path):

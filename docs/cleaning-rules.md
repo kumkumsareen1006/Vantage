@@ -171,6 +171,29 @@ Current thresholds (in `config/vantage.toml`, re-exported by `prototype/config.p
 2026-10-15 00:00 to 2026-10-16 18:00 UTC (hour start) to surface the obvious top
 movers without flagging the long tail of small blips.
 
+### Edit spike and co-spike (Day 17)
+
+Edits are joined to the view spikes to find pages where attention and editing surge
+together. The edit side comes from the streaming edits Silver (Oct 15-18 is backfilled
+from the captured JSONL through the same Silver code, tagged `source = 'capture'`; the
+live-streamed rows are `source = 'kafka'`).
+
+- **Edit counts per page per hour.** From edits Silver, only `type` in (`edit`, `new`)
+  and `namespace == 0` — the actual-article-revision filter the streaming Silver defers
+  to here. `hour` is `meta.dt` truncated to the UTC hour, so an edit at 14:59 and the
+  views in `pageviews-...-150000.gz` (hour 14:00) share hour 14:00. `title` is
+  `title_norm`, so a space-vs-underscore spelling joins the views. `human_edits` and
+  `bot_edits` are counted separately on the `bot` flag (missing `bot` → human).
+- **Edit spike.** The same robust z-score as views, on `human_edits`: previous
+  `baseline_hours` (current hour excluded), `max(MAD, 1)`, with its own `edits_floor`
+  and `min_jump`. A title is scored only if it reaches `edits_floor` human edits in at
+  least one hour. **Bot edits never enter the score.**
+- **co_spike** = `is_spike AND edit_spike` in the same hour — a view spike and a human-edit
+  spike together. It never changes `is_spike` or `edit_spike`; it is an extra column.
+
+Edit-spike thresholds live in `[edit_spikes]` of `config/vantage.toml`
+(`baseline_hours`, `z_min`, `edits_floor`, `min_jump`).
+
 ## Quarantine reasons
 
 A quarantined row is never dropped silently and never crashes the run; it is kept

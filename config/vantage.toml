@@ -42,6 +42,23 @@ min_jump = 1000
 desktop_share_min = 0.8
 isolation_ratio = 0.05
 
+[edit_spikes]
+# Robust z-score on human_edits per (title, hour), previous baseline_hours excluding the
+# current hour, max(MAD, 1). Mirrors the view spike rule; bot edits never count. A title is
+# scored only if it reaches edits_floor human edits in at least one hour; a flagged hour also
+# needs the absolute jump (human_edits - median) >= min_jump.
+baseline_hours = 24
+z_min = 6.0
+edits_floor = 10
+min_jump = 10
+
+[edits_backfill]
+# Captured-edit backfill window (UTC, hour start, end exclusive). Matches the pageview batch
+# window (Oct 15-18) so streamed-Nov and captured-Oct edits don't overlap and the Gold join
+# has edit and view hours in common.
+start = "2026-10-15T00"
+end = "2026-10-18T00"
+
 [kafka]
 # Phase 2 streaming. Broker runs in Docker (docker-compose.yml); clients run in the venv.
 bootstrap_servers = "localhost:9092"

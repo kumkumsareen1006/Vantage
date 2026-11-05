@@ -26,6 +26,14 @@ MIN_JUMP = CONFIG["spikes"]["min_jump"]
 DESKTOP_SHARE_MIN = CONFIG["spikes"]["desktop_share_min"]
 ISOLATION_RATIO = CONFIG["spikes"]["isolation_ratio"]
 
+EDIT_BASELINE_HOURS = CONFIG["edit_spikes"]["baseline_hours"]
+EDIT_Z_MIN = CONFIG["edit_spikes"]["z_min"]
+EDITS_FLOOR = CONFIG["edit_spikes"]["edits_floor"]
+EDIT_MIN_JUMP = CONFIG["edit_spikes"]["min_jump"]
+
+EDITS_BACKFILL_START = CONFIG["edits_backfill"]["start"]
+EDITS_BACKFILL_END = CONFIG["edits_backfill"]["end"]
+
 
 KAFKA = CONFIG["kafka"]
 KAFKA_BOOTSTRAP = KAFKA["bootstrap_servers"]

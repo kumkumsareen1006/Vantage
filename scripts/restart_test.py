@@ -43,7 +43,11 @@ def gather(spark):
     bronze_ids = {r["meta_id"] for r in clean.select("meta_id").distinct().collect()}
     ann.unpersist()
 
+    # only the streamed rows have Kafka lineage; the Day 17 capture backfill (source='capture')
+    # has no offsets and is excluded from the offset-based checks.
     silver = spark.read.format("delta").load(str(config.LAKE["silver_edits"]))
+    if "source" in silver.columns:
+        silver = silver.where(F.col("source") == "kafka")
     silver_rows = silver.count()
     silver_ids = {r["meta_id"] for r in silver.select("meta_id").distinct().collect()}
 
