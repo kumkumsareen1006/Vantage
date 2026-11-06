@@ -94,6 +94,16 @@ silver_edits = "data/lake/silver_edits"
 # Malformed edit events (Day 15): raw value + partition/offset + reason.
 quarantine_edits = "data/lake/quarantine_edits"
 
+[azure]
+# Phase 3 (Day 19). Pay-as-you-go subscription "Azure subscription 1". Names only,
+# no keys or secrets: auth is via `az login` / a service principal (Day 20).
+resource_group = "rg-vantage"
+region = "eastus"
+storage_account = "vantagelakee7ad27"
+container = "lake"
+# ADLS Gen2 filesystem root; Bronze/Silver/Gold move here on Day 20.
+dfs_endpoint = "https://vantagelakee7ad27.dfs.core.windows.net"
+
 [checkpoints]
 # Structured Streaming checkpoints (git-ignored under data/). The checkpoint is the
 # stream's offset bookkeeping: it records which Kafka offsets Bronze has committed,
