@@ -35,7 +35,10 @@ def main(argv):
                     help="reprocess every file through Silver (passed through to the stages)")
     ap.add_argument("--start", default=config.WINDOW_START, help="bronze window start, e.g. 2026-10-15T00")
     ap.add_argument("--end", default=config.WINDOW_END, help="bronze window end (exclusive)")
+    ap.add_argument("--target", choices=["local", "azure"], default=config.TARGET,
+                    help="where the Delta tables live (default: local, or $VANTAGE_TARGET)")
     args = ap.parse_args(argv)
+    config.set_target(args.target)    # before any stage reads config.LAKE
     start, end = parse_hour(args.start), parse_hour(args.end)
 
     run_id = uuid.uuid4().hex
@@ -49,7 +52,7 @@ def main(argv):
         finally:
             s.stop()
 
-    rlog.event("run_start", full=args.full, start=args.start, end=args.end)
+    rlog.event("run_start", full=args.full, start=args.start, end=args.end, target=args.target)
     t0 = time.perf_counter()
     stages = [
         ("bronze", lambda: run_bronze(start, end, args.full)),

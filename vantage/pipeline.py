@@ -197,7 +197,7 @@ def gold_skip_reason(full, silver_version, last_gold_version):
 
 def run_gold(full=False, silver_path=None, gold_path=None, run_metrics_path=None):
     silver_path = config.LAKE["silver"] if silver_path is None else silver_path
-    gold_path = Path(config.LAKE["gold"] if gold_path is None else gold_path)
+    gold_path = config.LAKE["gold"] if gold_path is None else gold_path
     run_metrics_path = config.LAKE["run_metrics"] if run_metrics_path is None else run_metrics_path
     spark = get_spark(app_name="vantage-gold")
     try:
@@ -217,7 +217,7 @@ def run_gold(full=False, silver_path=None, gold_path=None, run_metrics_path=None
                 "spikes": spike_scores(silver)}
         rows_out = 0
         for name, df in outs.items():
-            p = gold_path / name
+            p = config.lake_join(gold_path, name)
             v0 = table_version(spark, p)
             _overwrite(df, p)
             rows_out += rows_written_since(spark, p, v0)

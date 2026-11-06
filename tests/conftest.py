@@ -3,7 +3,7 @@ import socket
 import pytest
 
 from vantage import config
-from vantage.spark import get_spark
+from vantage.spark import SP_FILE, get_spark
 
 
 @pytest.fixture(scope="session")
@@ -24,10 +24,14 @@ def _broker_up():
 
 
 def pytest_collection_modifyitems(config, items):
-    # keep CI green without Kafka: skip broker tests when 9092 isn't reachable
-    if _broker_up():
-        return
-    skip = pytest.mark.skip(reason="no Kafka broker on localhost:9092")
+    # keep CI green without Kafka/Azure: skip broker tests when 9092 isn't reachable,
+    # and skip azure tests unless the service-principal credentials are present.
+    broker = _broker_up()
+    creds = SP_FILE.exists()
+    skip_kafka = pytest.mark.skip(reason="no Kafka broker on localhost:9092")
+    skip_azure = pytest.mark.skip(reason=f"no Azure SP credentials ({SP_FILE})")
     for item in items:
-        if "kafka" in item.keywords:
-            item.add_marker(skip)
+        if "kafka" in item.keywords and not broker:
+            item.add_marker(skip_kafka)
+        if "azure" in item.keywords and not creds:
+            item.add_marker(skip_azure)

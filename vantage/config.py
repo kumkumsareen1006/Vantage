@@ -3,6 +3,7 @@
 Single source of truth for paths, scope and thresholds, shared by the vantage
 package and the Phase 0 prototype (prototype/config.py re-exports from here).
 """
+import os
 import tomllib
 from pathlib import Path
 
@@ -48,8 +49,50 @@ RAW_PAGEVIEWS = _abs(CONFIG["paths"]["raw_pageviews"])
 RAW_EDITS = _abs(CONFIG["paths"]["raw_edits"])
 INTERIM_PAGEVIEWS = _abs(CONFIG["paths"]["interim_pageviews"])
 
-# bronze / silver / gold / quarantine / bronze_edits -> absolute paths
-LAKE = {name: _abs(rel) for name, rel in CONFIG["lake"].items()}
+AZURE = CONFIG.get("azure", {})
+
+# Phase 3: the batch tables can live on ADLS Gen2 instead of local disk. The switch
+# is --target local|azure (or VANTAGE_TARGET); only these tables move -- the streaming
+# tables and checkpoints stay local, and raw .gz files are always read from local disk.
+_AZURE_LAKE_KEYS = ("bronze", "silver", "gold", "quarantine", "run_metrics")
+
+_LOCAL_LAKE = {name: _abs(rel) for name, rel in CONFIG["lake"].items()}
 
 # Structured Streaming checkpoint locations -> absolute paths
 CHECKPOINTS = {name: _abs(rel) for name, rel in CONFIG.get("checkpoints", {}).items()}
+
+
+def _azure_uri(name):
+    return f"abfss://{AZURE['container']}@{AZURE['storage_account']}.dfs.core.windows.net/{name}"
+
+
+def lake_join(base, *parts):
+    """Join a lake path with child segments. Path join locally; string join for an
+    abfss:// URI (Path would collapse the // after the scheme)."""
+    base = str(base)
+    if "://" in base:
+        return "/".join([base.rstrip("/"), *parts])
+    return Path(base).joinpath(*parts)
+
+
+# bronze / silver / gold / quarantine / run_metrics / *_edits -> local paths or (under
+# --target azure) abfss:// URIs for the batch tables. Mutated in place by set_target so
+# every `config.LAKE[...]` lookup sees the active target.
+LAKE = dict(_LOCAL_LAKE)
+TARGET = "local"
+
+
+def set_target(target):
+    global TARGET
+    if target not in ("local", "azure"):
+        raise ValueError(f"unknown target {target!r} (use local or azure)")
+    if target == "azure" and not AZURE:
+        raise RuntimeError("--target azure needs an [azure] section in config/vantage.toml")
+    TARGET = target
+    LAKE.clear()
+    LAKE.update(_LOCAL_LAKE)
+    if target == "azure":
+        LAKE.update({name: _azure_uri(name) for name in _AZURE_LAKE_KEYS})
+
+
+set_target(os.environ.get("VANTAGE_TARGET", "local"))
