@@ -1,4 +1,4 @@
-# Databricks job (Phase 3, Day 21)
+# Databricks job (Phase 3, Days 21-22)
 
 The batch pipeline's Silver and Gold stages run as an Azure Databricks job against the
 Delta tables on ADLS Gen2. Bronze stays as landed on Day 20: the raw pageview `.gz` files
@@ -10,7 +10,7 @@ only exist on the laptop, and Bronze on ADLS already holds all 72 hours.
 |---|---|
 | Job | `vantage-batch`, defined in [`databricks.yml`](../databricks.yml) (Databricks Asset Bundle) |
 | Code | the repo, synced to the workspace by `databricks bundle deploy` (git-ignored paths excluded) |
-| Entry point | `scripts/run_pipeline.py --target azure --stages silver,gold --full` (a Python script task, no notebook) |
+| Entry point | `scripts/run_pipeline.py --target azure --stages silver,gold` (a Python script task, no notebook). Day 21 ran it with `--full`. |
 | Compute | job cluster, single node `Standard_E4ds_v4` (4 vCPU, 32 GB), DBR 15.4 LTS, Photon off |
 | Guards | `timeout_seconds: 7200`, `max_retries: 0`, `max_concurrent_runs: 1`; the cluster exists only for the run |
 | Storage auth | service principal `vantage-sp` (Storage Blob Data Contributor on the storage account), read from Databricks secret scope `vantage` |
@@ -120,6 +120,27 @@ databricks bundle run vantage_batch \
 - The 2026-10-15 partition in the new version (v7) matches v2 exactly: 50,417,645 rows,
   189,432,040 views, and an `exceptAll` on `(project, title, hour, views)` of 0 in
   both directions.
+
+## Scheduled run (Day 22, 2026-11-10)
+
+The schedule fired the job once: Quartz cron `0 21 17 10 11 ? 2026`, timezone
+America/New_York. The year in the cron stops it from firing again. Development mode pauses
+schedules unless they say `pause_status: UNPAUSED`, so the bundle stayed in development mode
+with that set. The run's job cluster carried the tag `vantage_run=day22-scheduled` so its cost
+can be found later. The schedule was removed from `databricks.yml` and redeployed right after
+the run.
+
+- Run 636280560090751, trigger `PERIODIC` (the schedule), started 17:21:20 EST, result SUCCESS.
+- Time: setup 323 s, execution 869 s, run 1,193 s. Silver 63.0 s (0 new files, 0 rows),
+  Gold 757.4 s, built from Silver version 7.
+- Silver: 142,728,341 rows, 0 duplicate keys, 562,648,784 views.
+- Gold: 84,348 rows (7,200 + 300 + 76,848), 2,027 `is_spike`, 7 `likely_automated`.
+  Gold spikes `exceptAll` against the local Gold spikes gives 0 rows in both directions.
+
+Cost view for 2026-11-10, read after the run (runs 1-3; the scheduled run lags behind):
+VM (E4ds v4) $0.7152, Premium Jobs Compute DBU $0.6441, storage $0.0498, public IP $0.0159,
+bandwidth $0.0005, total $1.4255. With secure cluster connectivity off, each job cluster
+node gets a public IP for the run. That IP is the public IP meter.
 
 ### Gotchas hit on the way
 
