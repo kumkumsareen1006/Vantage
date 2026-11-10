@@ -122,6 +122,36 @@ def test_main_block_exits_only_on_failure(code):
         exec(src, ns)       # returns normally, no SystemExit(0)
 
 
+def test_parse_days():
+    assert run_pipeline.parse_days("2026-10-16, 2026-10-15") == ("2026-10-15", "2026-10-16")
+    for bad in ("", "2026-13-01", "15-10-2026"):
+        with pytest.raises(argparse.ArgumentTypeError):
+            run_pipeline.parse_days(bad)
+
+
+def test_select_days():
+    from datetime import date
+    from vantage.pipeline import select_days
+    day_of = {"a": date(2026, 10, 15), "b": date(2026, 10, 15), "c": date(2026, 10, 16)}
+    assert select_days(["a", "b", "c"], day_of, None) == ["a", "b", "c"]
+    assert select_days(["a", "b", "c"], day_of, ("2026-10-15",)) == ["a", "b"]
+    with pytest.raises(ValueError):
+        select_days(["a"], day_of, ("2026-10-20",))
+
+
+def test_days_reach_silver(monkeypatch):
+    got = {}
+    monkeypatch.setattr(run_pipeline, "run_silver", lambda full, days: got.update(full=full, days=days) or {})
+    monkeypatch.setattr(run_pipeline, "setup_logging", lambda *a, **k: __import__("logging").getLogger("t"))
+    monkeypatch.setattr(run_pipeline, "get_spark", lambda **k: _FakeSession())
+    monkeypatch.setattr(run_pipeline, "write_run_metrics", lambda s, rows, p: None)
+    try:
+        assert run_pipeline.main(["--stages", "silver", "--days", "2026-10-15", "--full"]) == 0
+    finally:
+        config.set_target("local")
+    assert got == {"full": True, "days": ("2026-10-15",)}
+
+
 # The job spec is what Azure bills against, so pin the cost guards.
 def test_job_spec_cost_guards():
     spec = (ROOT / "databricks.yml").read_text()
@@ -133,3 +163,4 @@ def test_job_spec_cost_guards():
     assert "runtime_engine: STANDARD" in spec       # no Photon
     assert '"--stages", "silver,gold"' in spec
     assert "VANTAGE_TARGET: azure" in spec
+    assert "JNAME: zulu17-ca-amd64" in spec        # Java 17, for Silver parity

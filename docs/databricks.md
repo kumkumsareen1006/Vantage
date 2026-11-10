@@ -106,6 +106,21 @@ duplicate keys. The cause is title normalization's first-letter uppercase:
 
 The fix is to run the cluster on Java 17 so normalization matches the laptop.
 
+**Fix, verified (2026-11-10).** The job cluster now sets `JNAME: zulu17-ca-amd64`.
+Silver was restored to version 2 (the Day 20 state: 142,728,341 rows, 562,648,784
+views). Then one day was re-run on the cluster:
+
+```bash
+databricks bundle run vantage_batch \
+  --python-params="--target,azure,--stages,silver,--days,2026-10-15,--full"
+```
+
+- The run logged `java_version 17.0.20` and `upper('ს')` = `U+1CA1`, the same as the laptop.
+- Time: setup 322 s, Silver 1,395 s (24 files, 50,420,726 rows in, 50,417,645 out, 0 quarantined).
+- The 2026-10-15 partition in the new version (v7) matches v2 exactly: 50,417,645 rows,
+  189,432,040 views, and an `exceptAll` on `(project, title, hour, views)` of 0 in
+  both directions.
+
 ### Gotchas hit on the way
 
 - A Python script task is `exec()`'d inside a kernel, so `__file__` is not set.

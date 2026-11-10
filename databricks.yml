@@ -45,6 +45,9 @@ resources:
               project: vantage
             spark_env_vars:
               VANTAGE_TARGET: azure
+              # DBR 15.4 defaults to Java 8, whose upper() leaves Georgian letters alone;
+              # Java 17 matches the laptop and CI (docs/databricks.md, Silver parity)
+              JNAME: zulu17-ca-amd64
       tasks:
         - task_key: silver_gold
           job_cluster_key: single_node

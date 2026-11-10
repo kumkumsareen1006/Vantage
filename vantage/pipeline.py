@@ -141,7 +141,18 @@ def silver_day_loop(spark, bronze, silver_path, quar_path, todo, day_of, all_day
             "days": [str(d) for d in days], "files_processed": len(todo)}
 
 
-def run_silver(full=False):
+def select_days(todo, day_of, days):
+    """Keep only the todo files whose Bronze file_date is in days (None keeps all).
+    A requested day with nothing in Bronze is an error, not a silent no-op."""
+    if not days:
+        return todo
+    missing = set(days) - {str(d) for d in day_of.values()}
+    if missing:
+        raise ValueError(f"no Bronze files for day(s): {', '.join(sorted(missing))}")
+    return [f for f in todo if str(day_of[f]) in days]
+
+
+def run_silver(full=False, days=None):
     spark = get_spark(app_name="vantage-silver")
     try:
         # a day's batch is ~24x a file; keep the file-sized shape that fits 4g (see build_silver.py)
@@ -151,6 +162,7 @@ def run_silver(full=False):
         bronze = spark.read.format("delta").load(str(config.LAKE["bronze"]))
         silver_path, quar_path = config.LAKE["silver"], config.LAKE["quarantine"]
         todo, day_of, all_day_files, _, _ = silver_todo(spark, bronze, silver_path, full)
+        todo = select_days(todo, day_of, days)
         sv0 = table_version(spark, silver_path)
         qv0 = table_version(spark, quar_path)
         info = silver_day_loop(spark, bronze, silver_path, quar_path, todo, day_of, all_day_files)

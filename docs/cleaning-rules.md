@@ -35,6 +35,13 @@ they are meant to be exact. Scope is English Wikipedia only: `en` (desktop) and
 - Trim whitespace, replace spaces with underscores, and uppercase the **first
   character only**. Never lowercase: Wikipedia titles are case-sensitive after
   the first letter.
+- Known limitation: MediaWiki may not capitalize the first letter of Georgian
+  titles, but this rule does: `ს` (U+10E1) becomes Mtavruli `Ს` (U+1CA1). So a
+  Georgian-script title can differ from the one Wikipedia shows. Pageviews and
+  edits go through the same rule, so joins are unaffected. The mapping depends
+  on the JVM's Unicode tables (Java 8 leaves the letter alone), so every engine
+  runs Java 17: the laptop, CI, and the Databricks cluster (`JNAME` in
+  `databricks.yml`). `tests/test_title_case.py` pins the result.
 
 **Drops**
 - Drop non-article namespaces by title prefix before the first colon
