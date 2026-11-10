@@ -5,12 +5,15 @@ failed stage stops the run (later stages are marked skipped) and exits non-zero.
     python scripts/run_pipeline.py                 # incremental
     python scripts/run_pipeline.py --full           # reprocess every file through Silver
     python scripts/run_pipeline.py --start 2026-10-15T00 --end 2026-10-18T00
+    python scripts/run_pipeline.py --target azure --stages silver,gold --full   # the Databricks job
 
 The per-stage scripts (build_bronze.py, build_silver.py, build_gold.py) still run
 standalone; this shares their transforms via vantage.pipeline.
 """
 import argparse
+import os
 import sys
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -22,11 +25,30 @@ from vantage import config
 from vantage.observability import RunLogger, setup_logging
 from vantage.pipeline import (execute_pipeline, run_bronze, run_gold, run_silver,
                               write_run_metrics)
-from vantage.spark import get_spark
+from vantage.spark import get_spark, on_databricks, release
+
+
+STAGES = ("bronze", "silver", "gold")
 
 
 def parse_hour(s):
     return datetime.strptime(s, "%Y-%m-%dT%H").replace(tzinfo=timezone.utc)
+
+
+def parse_stages(s):
+    """'silver,gold' -> ('silver', 'gold'), always in pipeline order."""
+    names = {x.strip() for x in s.split(",") if x.strip()}
+    unknown = names - set(STAGES)
+    if unknown or not names:
+        raise argparse.ArgumentTypeError(f"stages must be from {','.join(STAGES)}, got {s!r}")
+    return tuple(n for n in STAGES if n in names)
+
+
+def log_dir():
+    # on Databricks the repo is synced workspace files; driver logs keep stderr anyway
+    if on_databricks():
+        return Path(tempfile.gettempdir()) / "vantage-logs"
+    return config.ROOT / "logs"
 
 
 def main(argv):
@@ -37,12 +59,14 @@ def main(argv):
     ap.add_argument("--end", default=config.WINDOW_END, help="bronze window end (exclusive)")
     ap.add_argument("--target", choices=["local", "azure"], default=config.TARGET,
                     help="where the Delta tables live (default: local, or $VANTAGE_TARGET)")
+    ap.add_argument("--stages", type=parse_stages, default=STAGES,
+                    help="comma-separated subset of bronze,silver,gold (default: all)")
     args = ap.parse_args(argv)
     config.set_target(args.target)    # before any stage reads config.LAKE
     start, end = parse_hour(args.start), parse_hour(args.end)
 
     run_id = uuid.uuid4().hex
-    logger = setup_logging(config.ROOT / "logs" / "pipeline.jsonl")
+    logger = setup_logging(log_dir() / "pipeline.jsonl")
     rlog = RunLogger(logger, run_id)
 
     def metrics_writer(rows):
@@ -50,15 +74,18 @@ def main(argv):
         try:
             write_run_metrics(s, rows, config.LAKE["run_metrics"])
         finally:
-            s.stop()
+            release(s)
 
-    rlog.event("run_start", full=args.full, start=args.start, end=args.end, target=args.target)
+    rlog.event("run_start", full=args.full, start=args.start, end=args.end, target=args.target,
+               stages=",".join(args.stages),
+               databricks_runtime=os.environ.get("DATABRICKS_RUNTIME_VERSION"))
     t0 = time.perf_counter()
     stages = [
         ("bronze", lambda: run_bronze(start, end, args.full)),
         ("silver", lambda: run_silver(args.full)),
         ("gold", lambda: run_gold(args.full)),
     ]
+    stages = [st for st in stages if st[0] in args.stages]
     code = execute_pipeline(stages, run_id, rlog, metrics_writer)
     rlog.event("run_complete", seconds=round(time.perf_counter() - t0, 1),
                status="failed" if code else "success")

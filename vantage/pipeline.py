@@ -19,7 +19,7 @@ from pyspark.sql.types import (DoubleType, IntegerType, LongType, StringType,
 from vantage import config
 from vantage.ingest.bronze import land_files
 from vantage.ingest.pageviews import filename_for_start_hour, iter_start_hours
-from vantage.spark import get_spark
+from vantage.spark import get_spark, release
 from vantage.transform.gold import spike_scores, top_pages_daily, top_pages_hourly
 from vantage.transform.silver import (aggregate_collisions, files_to_process,
                                       merge_silver, silver_source_files)
@@ -93,7 +93,7 @@ def run_bronze(start, end, full=False):
         return {"rows_in": rows, "rows_out": rows, "rows_quarantined": 0,
                 "files_processed": len(landed)}
     finally:
-        spark.stop()
+        release(spark)
 
 
 # ---------------------------------------------------------------- Silver
@@ -162,7 +162,7 @@ def run_silver(full=False):
                 "rows_quarantined": rows_written_since(spark, quar_path, qv0),
                 "files_processed": info["files_processed"]}
     finally:
-        spark.stop()
+        release(spark)
 
 
 # ---------------------------------------------------------------- Gold
@@ -227,7 +227,7 @@ def run_gold(full=False, silver_path=None, gold_path=None, run_metrics_path=None
         return {"rows_in": None, "rows_out": rows_out, "rows_quarantined": 0,
                 "files_processed": None, "silver_version": silver_version}
     finally:
-        spark.stop()
+        release(spark)
 
 
 # ---------------------------------------------------------------- OPTIMIZE (maintenance)
@@ -263,7 +263,7 @@ def run_optimize(table="silver", path=None):
         print(f"OPTIMIZE {table}: {m['reason']}")
         return m
     finally:
-        spark.stop()
+        release(spark)
 
 
 # ---------------------------------------------------------------- VACUUM (maintenance)
@@ -300,7 +300,7 @@ def run_vacuum(table, path=None, retain_hours=24):
         print(f"VACUUM {table}: {m['reason']}")
         return m
     finally:
-        spark.stop()
+        release(spark)
 
 
 # ---------------------------------------------------------------- run_metrics

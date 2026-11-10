@@ -34,4 +34,6 @@ if [ -n "${APPID:-}" ]; then
 fi
 
 echo "Confirm with: az group exists -n $RG  (expect false)"
+# the Databricks workspace's managed group goes when the workspace does, a few minutes later
+echo "          and: az group exists -n ${RG}-dbx-managed  (expect false)"
 echo "Local credential file ~/.config/vantage/azure_sp.json is left for you to remove."

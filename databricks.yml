@@ -1,0 +1,56 @@
+# Databricks Asset Bundle for the Phase 3 batch job (Day 21). `databricks bundle deploy`
+# syncs the repo (minus .gitignore'd paths: data/, logs/, notes/, .venv/) to the workspace
+# and creates the job; `databricks bundle run vantage_batch` starts it. Host comes from the
+# `vantage` CLI profile, see docs/databricks.md.
+bundle:
+  name: vantage
+
+sync:
+  exclude:
+    - .vscode/**
+    - "**/__pycache__/**"
+    - spark-warehouse/**
+
+targets:
+  dev:
+    default: true
+    mode: development
+    workspace:
+      profile: vantage
+
+resources:
+  jobs:
+    vantage_batch:
+      name: vantage-batch
+      max_concurrent_runs: 1
+      # hard stop so a stuck run can't keep billing
+      timeout_seconds: 7200
+      tags:
+        project: vantage
+      job_clusters:
+        - job_cluster_key: single_node
+          new_cluster:
+            # Spark 3.5 / Python 3.11, same majors as local (Spark 3.5.9, Python 3.11.6)
+            spark_version: 15.4.x-scala2.12
+            # 4 vCPU / 32 GB. The subscription's eastus quota is 4 vCPUs total, so one node.
+            node_type_id: Standard_E4ds_v4
+            num_workers: 0
+            runtime_engine: STANDARD
+            data_security_mode: SINGLE_USER
+            single_user_name: ${workspace.current_user.userName}
+            spark_conf:
+              spark.databricks.cluster.profile: singleNode
+              spark.master: "local[*, 4]"
+            custom_tags:
+              ResourceClass: SingleNode
+              project: vantage
+            spark_env_vars:
+              VANTAGE_TARGET: azure
+      tasks:
+        - task_key: silver_gold
+          job_cluster_key: single_node
+          max_retries: 0
+          spark_python_task:
+            python_file: scripts/run_pipeline.py
+            # Bronze is already on ADLS (Day 20); the raw .gz files only exist on the laptop
+            parameters: ["--target", "azure", "--stages", "silver,gold", "--full"]

@@ -9,16 +9,21 @@ import sys
 from pathlib import Path
 
 from pyspark.sql import SparkSession
-from delta import configure_spark_with_delta_pip
 
 from vantage import config
+
+
+def on_databricks():
+    return "DATABRICKS_RUNTIME_VERSION" in os.environ
+
 
 # PySpark picks the worker interpreter from PYSPARK_PYTHON (defaulting to whatever
 # `python3` is on PATH), not from SparkConf -- so without the venv activated the
 # worker is a different Python than the driver and Spark aborts on the mismatch.
-# Pin both to this interpreter before any SparkContext is built.
-os.environ["PYSPARK_PYTHON"] = sys.executable
-os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
+# Pin both to this interpreter before any SparkContext is built. Databricks sets its own.
+if not on_databricks():
+    os.environ["PYSPARK_PYTHON"] = sys.executable
+    os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
 
 # 16 GB Mac, shared with the running edit capture and VS Code. 4g leaves headroom
 # for both plus macOS while giving the local driver enough for the batch job.
@@ -34,23 +39,55 @@ KAFKA_PACKAGE = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.9"
 # so the ABFS classes link against the same Hadoop the session already runs.
 HADOOP_AZURE_PACKAGE = "org.apache.hadoop:hadoop-azure:3.3.4"
 SP_FILE = Path.home() / ".config" / "vantage" / "azure_sp.json"
+# Databricks secret scope holding the same three SP keys as SP_FILE (docs/databricks.md).
+SECRET_SCOPE = "vantage"
+SP_KEYS = ("client_id", "client_secret", "tenant_id")
 
 
-def _azure_oauth(builder, account, sp):
+def azure_oauth_conf(account, sp):
     # Client-credentials OAuth for the one storage account. The key names contain
     # "secret", so Spark's default redaction keeps the value out of the UI and logs.
     host = f"{account}.dfs.core.windows.net"
-    return (builder
-            .config(f"spark.hadoop.fs.azure.account.auth.type.{host}", "OAuth")
-            .config(f"spark.hadoop.fs.azure.account.oauth.provider.type.{host}",
-                    "org.apache.hadoop.fs.azurebfs.oauth2.ClientCredsTokenProvider")
-            .config(f"spark.hadoop.fs.azure.account.oauth2.client.id.{host}", sp["client_id"])
-            .config(f"spark.hadoop.fs.azure.account.oauth2.client.secret.{host}", sp["client_secret"])
-            .config(f"spark.hadoop.fs.azure.account.oauth2.client.endpoint.{host}",
-                    f"https://login.microsoftonline.com/{sp['tenant_id']}/oauth2/token"))
+    return {
+        f"fs.azure.account.auth.type.{host}": "OAuth",
+        f"fs.azure.account.oauth.provider.type.{host}":
+            "org.apache.hadoop.fs.azurebfs.oauth2.ClientCredsTokenProvider",
+        f"fs.azure.account.oauth2.client.id.{host}": sp["client_id"],
+        f"fs.azure.account.oauth2.client.secret.{host}": sp["client_secret"],
+        f"fs.azure.account.oauth2.client.endpoint.{host}":
+            f"https://login.microsoftonline.com/{sp['tenant_id']}/oauth2/token",
+    }
+
+
+def _databricks_session():
+    # The cluster already has a session with Delta built in; jars, master and driver
+    # memory come from the cluster spec (databricks.yml), not from here.
+    spark = SparkSession.builder.getOrCreate()
+    from pyspark.dbutils import DBUtils
+    dbutils = DBUtils(spark)
+    sp = {k: dbutils.secrets.get(SECRET_SCOPE, k) for k in SP_KEYS}
+    for k, v in azure_oauth_conf(config.AZURE["storage_account"], sp).items():
+        spark.conf.set(k, v)
+    spark.conf.set("spark.sql.shuffle.partitions", SHUFFLE_PARTITIONS)
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
+    # DBR turns deletion vectors on for new tables; keep them off so the local
+    # delta-spark can keep reading and writing the same tables.
+    spark.conf.set("spark.databricks.delta.properties.defaults.enableDeletionVectors", "false")
+    return spark
+
+
+def release(spark):
+    """Stop a local session. On Databricks the session belongs to the cluster, and
+    stopping it ends the job."""
+    if not on_databricks():
+        spark.stop()
 
 
 def get_spark(app_name="vantage", master="local[*]", driver_memory=DRIVER_MEMORY):
+    if on_databricks():
+        return _databricks_session()
+    from delta import configure_spark_with_delta_pip
+
     builder = (
         SparkSession.builder.appName(app_name).master(master)
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
@@ -66,7 +103,8 @@ def get_spark(app_name="vantage", master="local[*]", driver_memory=DRIVER_MEMORY
     if config.TARGET == "azure":
         with open(SP_FILE) as fh:
             sp = json.load(fh)
-        builder = _azure_oauth(builder, config.AZURE["storage_account"], sp)
+        for k, v in azure_oauth_conf(config.AZURE["storage_account"], sp).items():
+            builder = builder.config(f"spark.hadoop.{k}", v)
         packages.append(HADOOP_AZURE_PACKAGE)
     # configure_spark_with_delta_pip adds the delta-spark jars matching the installed pip version
     spark = configure_spark_with_delta_pip(builder, extra_packages=packages).getOrCreate()

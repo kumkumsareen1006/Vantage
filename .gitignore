@@ -8,3 +8,4 @@ CLAUDE.md
 spark-warehouse/
 metastore_db/
 derby.log
+.databricks/
