@@ -19,7 +19,19 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+def _this_file():
+    # A Databricks python task exec()s the script in a kernel, so __file__ isn't set;
+    # argv[0] is the script path there, and the cwd is its folder.
+    try:
+        return Path(__file__)
+    except NameError:
+        if sys.argv and sys.argv[0].endswith(".py"):
+            return Path(sys.argv[0])
+        return Path.cwd() / "run_pipeline.py"
+
+
+sys.path.insert(0, str(_this_file().resolve().parents[1]))
 
 from vantage import config
 from vantage.observability import RunLogger, setup_logging
@@ -93,4 +105,7 @@ def main(argv):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    # exit only on failure: inside a Databricks task even SystemExit(0) can be reported as a failed run
+    code = main(sys.argv[1:])
+    if code:
+        sys.exit(code)

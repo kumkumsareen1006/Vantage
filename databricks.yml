@@ -9,7 +9,6 @@ sync:
   exclude:
     - .vscode/**
     - "**/__pycache__/**"
-    - spark-warehouse/**
 
 targets:
   dev:

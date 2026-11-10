@@ -89,6 +89,39 @@ def test_only_selected_stages_run(monkeypatch):
     assert [r["stage"] for r in written] == ["silver", "gold"]
 
 
+@pytest.mark.parametrize("argv0, cwd", [
+    (str(ROOT / "scripts" / "run_pipeline.py"), None),   # DBR passes the script as argv[0]
+    ("", ROOT / "scripts"),                               # else it runs from the script's folder
+])
+def test_script_runs_without_dunder_file(monkeypatch, argv0, cwd):
+    # Databricks spark_python_task: exec(compile(src, filename, "exec")) with no __file__
+    path = ROOT / "scripts" / "run_pipeline.py"
+    monkeypatch.setattr(sys, "argv", [argv0])
+    if cwd:
+        monkeypatch.chdir(cwd)
+    ns = {"__name__": "dbr_task"}       # not __main__, so main() isn't called
+    exec(compile(path.read_text(), str(path), "exec"), ns)
+    assert "__file__" not in ns
+    assert ns["_this_file"]().resolve().parents[1] == ROOT
+
+
+@pytest.mark.parametrize("code", [0, 1])
+def test_main_block_exits_only_on_failure(code):
+    import ast
+    path = ROOT / "scripts" / "run_pipeline.py"
+    tree = ast.parse(path.read_text())
+    block = next(n for n in tree.body if isinstance(n, ast.If)
+                 and ast.unparse(n.test) == "__name__ == '__main__'")
+    ns = {"__name__": "__main__", "sys": sys, "main": lambda argv: code}
+    src = compile(ast.Module(body=[block], type_ignores=[]), str(path), "exec")
+    if code:
+        with pytest.raises(SystemExit) as e:
+            exec(src, ns)
+        assert e.value.code == code
+    else:
+        exec(src, ns)       # returns normally, no SystemExit(0)
+
+
 # The job spec is what Azure bills against, so pin the cost guards.
 def test_job_spec_cost_guards():
     spec = (ROOT / "databricks.yml").read_text()

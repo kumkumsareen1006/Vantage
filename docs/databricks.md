@@ -33,16 +33,23 @@ Each pipeline stage stops its session locally (stage isolation, see Day 11). On 
 ## Setup
 
 ```bash
-# workspace: trial tier, secure cluster connectivity off so there's no NAT gateway
-az databricks workspace create -g rg-vantage -n dbw-vantage -l eastus --sku trial \
+# workspace: secure cluster connectivity off so there's no NAT gateway. Premium, because
+# the 14-day trial tier is refused on Azure Free Trial subscriptions.
+az databricks workspace create -g rg-vantage -n dbw-vantage -l eastus --sku premium \
   --managed-resource-group rg-vantage-dbx-managed --enable-no-public-ip false \
   --tags project=vantage
 
-# CLI profile using the existing `az login` (no personal access token)
+# Open the workspace once from the portal (Launch Workspace). Until then every API call
+# returns "Did not find workspace with specified org ID".
+
+# CLI profile using the existing `az login` (no personal access token). azure-cli auth
+# fails with "load tenant id" unless the resource id and tenant are set.
 cat >> ~/.databrickscfg <<EOF
 [vantage]
 host      = https://$(az databricks workspace show -g rg-vantage -n dbw-vantage --query workspaceUrl -o tsv)
 auth_type = azure-cli
+azure_workspace_resource_id = $(az databricks workspace show -g rg-vantage -n dbw-vantage --query id -o tsv)
+azure_tenant_id = $(az account show --query tenantId -o tsv)
 EOF
 
 # secret scope, values piped from the SP file so they never hit the terminal
@@ -54,7 +61,7 @@ done
 
 databricks bundle validate
 databricks bundle deploy
-databricks bundle run vantage_batch      # billed: VM + DBUs (DBUs waived on trial)
+databricks bundle run vantage_batch      # billed: VM + DBUs
 ```
 
 ## Teardown
@@ -67,7 +74,43 @@ az databricks workspace delete -g rg-vantage -n dbw-vantage --yes
 
 `scripts/azure_teardown.sh` (deletes all of `rg-vantage`) covers the workspace too.
 
-## Results
+## Results (first successful run, 2026-11-10)
 
-Filled in from the first job run: setup and execution time from the Jobs API, stage
-seconds and row counts from `run_metrics`, compared with the local and laptop-to-ADLS runs.
+Times from the Jobs API (setup, execution) and `run_metrics` (stages):
+
+| | Local (Day 11) | Laptop → ADLS (Day 20) | Databricks, 1 × E4ds_v4 |
+|---|---|---|---|
+| Cluster setup | – | – | 352 s |
+| Silver `--full` | 1,521 s | 1,852 s | 5,044 s |
+| Gold | 369 s | 620 s | 732 s |
+| Job execution | – | – | 5,820 s |
+
+The single 4-vCPU node (the subscription's whole regional quota) is slower than the
+laptop. Each Silver day's MERGE took about 25-28 minutes on the cluster against about
+10 on the laptop.
+
+Gold matched Day 20 exactly: 84,348 rows (7,200 hourly + 300 daily + 76,848 spikes),
+2,027 `is_spike`, 7 `likely_automated`. Delta protocol was unchanged on every table
+(reader 1, writer 2, no deletion vectors), and the laptop still reads all of it.
+Databricks' optimized writes left Silver at 11 files, down from 202.
+
+**Silver did not match.** It ended at 142,728,536 rows (Day 20: 142,728,341) with 0
+duplicate keys. The cause is title normalization's first-letter uppercase:
+
+- On Java 17 (laptop, CI), `upper('ს')` gives Georgian Mtavruli `Ს` (U+1CA1).
+- DBR 15.4 runs Java 8 by default, whose older Unicode tables leave the letter unchanged.
+- So 195 rows whose title starts with a Georgian letter got a different key and were
+  inserted next to the Day 20 rows (MERGE never deletes). 190 of the 195 start with a
+  lowercase Georgian letter.
+- Collisions merged: 8,675 here against 8,678 on Day 20.
+
+The fix is to run the cluster on Java 17 so normalization matches the laptop.
+
+### Gotchas hit on the way
+
+- A Python script task is `exec()`'d inside a kernel, so `__file__` is not set.
+  `run_pipeline.py` falls back to `sys.argv[0]`. It also returns normally on success
+  instead of calling `sys.exit(0)`. The first run failed on this after 414 s of setup
+  and 39 s of execution, before touching any table.
+- The trial workspace tier is refused on Azure Free Trial subscriptions.
+- The workspace API answers "Did not find workspace" until it's opened once in the portal.
