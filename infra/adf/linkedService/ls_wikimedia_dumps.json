@@ -1,0 +1,9 @@
+{
+  "type": "HttpServer",
+  "description": "Wikimedia pageview dumps, anonymous. The User-Agent header is set on the copy source.",
+  "typeProperties": {
+    "url": "https://dumps.wikimedia.org/other/pageviews/",
+    "authenticationType": "Anonymous",
+    "enableServerCertificateValidation": true
+  }
+}

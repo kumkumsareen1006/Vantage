@@ -1,0 +1,51 @@
+{
+  "description": "Copy one UTC day of hourly pageview files to lake/landing/pageviews/<yyyy>/<yyyy-mm>/. A file is named by the END of its hour, so day D is pageviews-D-010000 ... pageviews-(D+1)-000000. Folders follow the file name, as on the dumps site.",
+  "parameters": {"day": {"type": "String", "defaultValue": "2026-10-15"}},
+  "activities": [
+    {
+      "name": "ForEachHour",
+      "type": "ForEach",
+      "typeProperties": {
+        "isSequential": true,
+        "items": {"value": "@range(1, 24)", "type": "Expression"},
+        "activities": [
+          {
+            "name": "CopyHourFile",
+            "type": "Copy",
+            "policy": {"timeout": "0.00:30:00", "retry": 0},
+            "inputs": [{
+              "referenceName": "ds_wikimedia_pageview_file",
+              "type": "DatasetReference",
+              "parameters": {
+                "relativeUrl": {"value": "@concat(formatDateTime(addHours(pipeline().parameters.day, item()), 'yyyy/yyyy-MM'), '/pageviews-', formatDateTime(addHours(pipeline().parameters.day, item()), 'yyyyMMdd-HH'), '0000.gz')", "type": "Expression"}
+              }
+            }],
+            "outputs": [{
+              "referenceName": "ds_landing_pageview_file",
+              "type": "DatasetReference",
+              "parameters": {
+                "folderPath": {"value": "@concat('landing/pageviews/', formatDateTime(addHours(pipeline().parameters.day, item()), 'yyyy/yyyy-MM'))", "type": "Expression"},
+                "fileName": {"value": "@concat('pageviews-', formatDateTime(addHours(pipeline().parameters.day, item()), 'yyyyMMdd-HH'), '0000.gz')", "type": "Expression"}
+              }
+            }],
+            "typeProperties": {
+              "source": {
+                "type": "BinarySource",
+                "storeSettings": {
+                  "type": "HttpReadSettings",
+                  "requestMethod": "GET",
+                  "additionalHeaders": "User-Agent: Vantage/0.1 (https://github.com/kumkumsareen1006/Vantage; kumkumsareen04@gmail.com)"
+                }
+              },
+              "sink": {
+                "type": "BinarySink",
+                "storeSettings": {"type": "AzureBlobFSWriteSettings"}
+              },
+              "dataIntegrationUnits": 2
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "type": "AzureBlobFS",
+  "description": "ADLS Gen2 account. No credentials, so the factory's system-assigned managed identity is used.",
+  "typeProperties": {
+    "url": "https://vantagelakee7ad27.dfs.core.windows.net"
+  }
+}

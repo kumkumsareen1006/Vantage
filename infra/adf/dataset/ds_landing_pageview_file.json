@@ -1,0 +1,13 @@
+{
+  "type": "Binary",
+  "linkedServiceName": {"referenceName": "ls_vantage_lake", "type": "LinkedServiceReference"},
+  "parameters": {"folderPath": {"type": "String"}, "fileName": {"type": "String"}},
+  "typeProperties": {
+    "location": {
+      "type": "AzureBlobFSLocation",
+      "fileSystem": "lake",
+      "folderPath": {"value": "@dataset().folderPath", "type": "Expression"},
+      "fileName": {"value": "@dataset().fileName", "type": "Expression"}
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "type": "Binary",
+  "linkedServiceName": {"referenceName": "ls_wikimedia_dumps", "type": "LinkedServiceReference"},
+  "parameters": {"relativeUrl": {"type": "String"}},
+  "typeProperties": {
+    "location": {
+      "type": "HttpServerLocation",
+      "relativeUrl": {"value": "@dataset().relativeUrl", "type": "Expression"}
+    }
+  }
+}
