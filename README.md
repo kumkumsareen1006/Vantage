@@ -2,23 +2,49 @@
 
 [![tests](https://github.com/kumkumsareen1006/Vantage/actions/workflows/tests.yml/badge.svg)](https://github.com/kumkumsareen1006/Vantage/actions/workflows/tests.yml)
 
-A Spark + Delta Lake pipeline over English Wikipedia pageviews and edits. Together,
-Phase 1 and Phase 2 now answer the full question this project was built toward:
-which articles suddenly drew unusual attention in a given hour — a spike of views
-larger than their own recent history explains — which of those spikes look automated
-rather than driven by real readers, and whether people were editing those same
-articles at the same time. Phase 1 reads the raw hourly pageview dumps, cleans and
-aggregates them through medallion layers, and scores each (title, hour) against a
-24-hour baseline. The automated-traffic flag is a heuristic: a desktop-only,
-single-hour burst is a strong signal of scraper or redirect traffic, not a verified
-label.
+Vantage finds the English Wikipedia articles whose attention suddenly spikes, using the
+hourly pageview dumps joined with the live edit stream.
 
-Phase 1 is a local batch lakehouse over the pageview dumps. **Phase 2 adds the live
-edit stream** — the Wikimedia recent-changes feed through Kafka and Spark Structured
-Streaming into the same medallion layers, then joined to the pageview spikes to show
-which surges of attention were matched by a surge of human editing. **Phase 3 runs the
-batch pipeline on Azure** (ADLS Gen2, Databricks, Data Factory) with the same counts as the
-laptop; see [Phase 3: Azure](#phase-3-azure).
+```mermaid
+flowchart LR
+    PV["Hourly pageview dumps"] --> B
+    ES["Wikimedia EventStreams<br/>(recent changes)"] --> K["Kafka"] --> B
+    B["Bronze"] --> S["Silver"] --> G["Gold<br/>spikes + co-spikes"]
+    S -. bad rows .-> Q["Quarantine"]
+    B & S & G -.-> M["run_metrics<br/>(one row per stage)"]
+    AZ["The batch pipeline also ran on Azure:<br/>ADLS Gen2, Databricks, Data Factory"]
+    style AZ stroke-dasharray: 4 4
+```
+
+## Highlights
+
+- **152.9M → 142.7M rows, 2,027 spikes.** 72 hourly pageview files: 152,935,529 Bronze rows
+  cleaned to 142,728,341 Silver rows. 2,027 view spikes found, and 7 of them flagged as likely
+  automated traffic ([Results](#results)).
+- **Safe to rerun and restart.** Reruns leave 0 duplicate keys. After a `kill -9` of the stream
+  and the producer, nothing was lost and 8 upstream duplicates were removed. Bad rows go to
+  quarantine with a reason. 119 tests run in CI ([Idempotency](#idempotency),
+  [restart test](docs/restart-test.md), [How to run](#how-to-run)).
+- **Live edits through Kafka.** An idempotent producer feeds Kafka, and Spark Structured
+  Streaming writes Bronze and Silver (deduped on `meta.id`, usernames hashed): 3,909,296 unique
+  edits ([Honest limits (Phase 2)](#honest-limits-phase-2)). Joined to the view spikes, that
+  gives 27 co-spikes across 16 titles ([Phase 2 results](#phase-2-results)).
+- **Same results on Azure.** ADLS Gen2 and Databricks matched the local tables exactly (after a
+  [Java 8 vs 17 fix](#the-java-8-vs-java-17-georgian-bug)), and Data Factory landed 24 of 24
+  files with matching MD5s. All the Azure work cost $1.8277 in total
+  ([ADLS parity](#adls-parity-with-local),
+  [Data Factory](#data-factory-a-day-of-files-with-matching-md5s), [Costs](#costs)).
+
+PySpark · Delta Lake · Kafka · Spark Structured Streaming · Azure (ADLS Gen2, Databricks, Data Factory) · GitHub Actions
+
+## Contents
+
+- [Architecture](#architecture)
+- [Scope: `en` and `en.m` only](#scope-en-and-enm-only)
+- [Why Delta](#why-delta) · [Idempotency](#idempotency) · [Results](#results) · [Findings](#findings) · [Honest limits](#honest-limits)
+- [Phase 2 — streaming the edit feed](#phase-2--streaming-the-edit-feed)
+- [Phase 3: Azure](#phase-3-azure)
+- [How to run](#how-to-run) · [Roadmap](#roadmap)
 
 ## Architecture
 
