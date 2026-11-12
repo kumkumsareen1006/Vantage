@@ -547,6 +547,17 @@ The job then ran once on its own, from a schedule:
 | Gold rows / `is_spike` / `likely_automated` | 84,348 / 2,027 / 7 | [P2] |
 | Gold spikes `exceptAll` vs local Gold spikes | 0 rows both ways | [P2] |
 
+The first run's `__file__` failure is described in
+[docs/databricks.md](docs/databricks.md#gotchas-hit-on-the-way).
+
+![Databricks job run history](docs/img/databricks-runs.png)
+
+*Job run history: the first run failed, then three runs succeeded. The last one was the scheduled run (19m 53s).*
+
+![Databricks scheduled run log](docs/img/databricks-scheduled-run-log.png)
+
+*Log of the scheduled run: Java 17.0.20 (upper('ს') → U+1CA1), Silver found no new files, Gold rebuilt 84,348 rows in 757 s.*
+
 ### Data Factory: a day of files with matching MD5s
 
 `pl_copy_pageviews_day(day)` takes a day and copies its 24 hourly files from
