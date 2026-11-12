@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Deletes the whole rg-vantage resource group AND the vantage-sp app registration
 # (an AAD app lives in the directory, not the resource group, so deleting the group
-# does not remove it). Pay-as-you-go subscription: this stops all Azure billing for
-# the project. Asks for explicit confirmation first. Run it yourself; nothing else does.
+# does not remove it). Free Trial subscription with a spending limit: this stops all
+# Azure billing for the project. Asks for explicit confirmation first. Run it yourself; nothing else does.
 set -euo pipefail
 
 RG="rg-vantage"

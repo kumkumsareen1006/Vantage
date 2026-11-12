@@ -78,11 +78,11 @@ az databricks workspace delete -g rg-vantage -n dbw-vantage --yes
 
 Times from the Jobs API (setup, execution) and `run_metrics` (stages):
 
-| | Local (Day 11) | Laptop → ADLS (Day 20) | Databricks, 1 × E4ds_v4 |
+| | Local (full run, README [12]) | Laptop → ADLS (Day 20) | Databricks, 1 × E4ds_v4 |
 |---|---|---|---|
 | Cluster setup | – | – | 352 s |
 | Silver `--full` | 1,521 s | 1,852 s | 5,044 s |
-| Gold | 369 s | 620 s | 732 s |
+| Gold | 434 s | 620 s | 732 s |
 | Job execution | – | – | 5,820 s |
 
 The single 4-vCPU node (the subscription's whole regional quota) is slower than the
@@ -99,6 +99,8 @@ duplicate keys. The cause is title normalization's first-letter uppercase:
 
 - On Java 17 (laptop, CI), `upper('ს')` gives Georgian Mtavruli `Ს` (U+1CA1).
 - DBR 15.4 runs Java 8 by default, whose older Unicode tables leave the letter unchanged.
+  Source: "For Databricks Runtime versions 13.1 to 15.4, JDK 8 is the default, and JDK 17 is
+  in Public Preview." (https://learn.microsoft.com/en-us/azure/databricks/dev-tools/sdk-java)
 - So 195 rows whose title starts with a Georgian letter got a different key and were
   inserted next to the Day 20 rows (MERGE never deletes). 190 of the 195 start with a
   lowercase Georgian letter.

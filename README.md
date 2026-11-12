@@ -16,8 +16,9 @@ label.
 Phase 1 is a local batch lakehouse over the pageview dumps. **Phase 2 adds the live
 edit stream** — the Wikimedia recent-changes feed through Kafka and Spark Structured
 Streaming into the same medallion layers, then joined to the pageview spikes to show
-which surges of attention were matched by a surge of human editing. Phase 3 (cloud) is
-[planned](#roadmap).
+which surges of attention were matched by a surge of human editing. **Phase 3 runs the
+batch pipeline on Azure** (ADLS Gen2, Databricks, Data Factory) with the same counts as the
+laptop; see [Phase 3: Azure](#phase-3-azure).
 
 ## Architecture
 
@@ -408,6 +409,200 @@ and filters on `gold/co_spikes` (`scripts/build_co_spikes.py`); thresholds
   the pageview Silver covers and the October edits were backfilled for; the live stream
   (November) accumulates for a future, wider join rather than being joined to views yet.
 
+## Phase 3: Azure
+
+Phase 3 runs the Phase 1 batch pipeline against Azure and checks that it gives the same
+numbers as the laptop. `--target azure` (or `VANTAGE_TARGET=azure`) points the batch tables at
+ADLS Gen2. The rest is the same code plus a small Databricks mode:
+- **Session:** reuse the cluster's Spark session, read the service principal from a secret
+  scope.
+- **Entry point:** a fallback for the missing `__file__`, since Databricks `exec()`s the script.
+- **Cluster:** a Java 17 setting on the job cluster.
+
+### What ran in Azure and what stayed local
+
+| Where | What |
+|---|---|
+| **Azure, ADLS Gen2** (`vantagelakee7ad27`, container `lake`, hierarchical namespace on) | Bronze, Silver, Gold, quarantine and `run_metrics` Delta tables for the batch pipeline. Day 23's `landing/` copy of one day of raw files. |
+| **Azure Databricks** (Premium workspace, job cluster only) | Silver and Gold, as a [Databricks Asset Bundle](databricks.yml) job running `scripts/run_pipeline.py`. See [docs/databricks.md](docs/databricks.md). |
+| **Azure Data Factory** (`adf-vantage`) | One pipeline copying a day of hourly pageview files from the Wikimedia dumps into `landing/`. See [docs/data-factory.md](docs/data-factory.md). |
+| **Laptop** | The raw `.gz` files, the Bronze load to ADLS (Day 20), and all of Phase 2: Kafka, the producer, the streaming tables and their checkpoints. |
+
+Storage auth:
+- Spark uses a service principal (`vantage-sp`) with one role, Storage Blob Data Contributor,
+  scoped to the storage account. On the laptop its secret lives outside the repo; on
+  Databricks it comes from a secret scope.
+- Data Factory uses its own managed identity with the same single role. Its linked services
+  hold no keys or secrets.
+
+### ADLS parity with local
+
+A full run from the laptop with `--target azure` wrote all three layers to ADLS. Every count
+matched the local lake:
+
+| | Local | Laptop → ADLS | Source |
+|---|---|---|---|
+| Bronze rows | 152,935,529 | 152,935,529 | [P1] |
+| Silver rows / duplicate keys | 142,728,341 / 0 | 142,728,341 / 0 | [P2] |
+| Silver total views | 562,648,784 | 562,648,784 | [P2] |
+| Gold rows (hourly + daily + spikes) | 84,348 (7,200 + 300 + 76,848) | 84,348 (7,200 + 300 + 76,848) | [P2] |
+| `is_spike` / `likely_automated` | 2,027 / 7 | 2,027 / 7 | [P2] |
+| Stage seconds: Bronze / Silver `--full` / Gold | – / 1,521 / 434 | 632 / 1,852 / 620 | [P1] [12] |
+
+### Databricks: timings, and why it was slower
+
+The job runs Silver and Gold on one `Standard_E4ds_v4` node (4 vCPU, 32 GB) with DBR 15.4 LTS
+and Photon off. The cluster exists only for the run.
+
+| | Local | Laptop → ADLS | Databricks, 1 node | Source |
+|---|---|---|---|---|
+| Cluster setup | – | – | 352 s | [P3] |
+| Silver `--full`, 72 files | 1,521 s | 1,852 s | 5,044 s | [P1] [P3] [12] |
+| Gold | 434 s | 620 s | 732 s | [P1] [P3] [12] |
+| Job execution | – | – | 5,820 s | [P3] |
+
+The cluster was slower than the laptop. The subscription is an Azure Free Trial, and its eastus
+quota is **4 vCPUs in total** [P4]. So the job cluster is a single 4-vCPU node, with no
+workers and nothing to scale out onto.
+
+### The Java 8 vs Java 17 Georgian bug
+
+The first full Databricks run matched Gold exactly, but **Silver had 195 extra rows**:
+142,728,536 against 142,728,341, with 562,648,986 views against 562,648,784. Collisions merged
+were 8,675 against 8,678 [P5]. The cause was in title normalization, which uppercases the
+first letter:
+
+- On Java 17 (the laptop and CI), Spark's `upper('ს')` maps Georgian Mkhedruli U+10E1 to
+  Mtavruli `Ს` U+1CA1.
+- DBR 15.4 runs Java 8 by default [P12], whose older Unicode tables leave the letter
+  unchanged.
+- So titles starting with a lowercase Georgian letter got a different Silver key. MERGE inserted
+  them next to the existing rows, since it never deletes. 190 of the 195 new keys start with a
+  Mkhedruli letter [P5].
+
+The fix had four parts:
+
+1. **Java 17 on the cluster:** `JNAME: zulu17-ca-amd64` on the job cluster, and the job now logs
+   `java_version` and `upper('ს')` at start. The test is `tests/test_title_case.py`.
+2. **RESTORE:** Silver on ADLS was rolled back with Delta `RESTORE` to version 2, the Day 20
+   state: 142,728,341 rows and 562,648,784 views [P6].
+3. **One-day parity rerun:** instead of a full rerun, a Silver-only run of one day
+   (`--days 2026-10-15 --full`). It logged `java_version 17.0.20` and `upper_ka U+1CA1`.
+   Version 7's 2026-10-15 partition matched version 2 exactly: 50,417,645 rows and
+   189,432,040 views on both sides, and an `exceptAll` on `(project, title, hour, views)` of 0
+   in both directions [P6].
+4. **Known limitation:** MediaWiki may not capitalize Georgian titles, so the uppercase-first
+   rule can produce titles that differ from Wikipedia's. Both engines now apply the same rule,
+   so joins are unaffected ([docs/cleaning-rules.md](docs/cleaning-rules.md)).
+
+### The scheduled run
+
+The job then ran once on its own, from a schedule:
+- **Schedule:** Quartz cron `0 21 17 10 11 ? 2026`, America/New_York. The year makes it fire
+  once.
+- **Run:** trigger `PERIODIC`, result SUCCESS [P7].
+- **Job:** the normal run, `--target azure --stages silver,gold` without `--full`. The job
+  cluster was tagged `vantage_run=day22-scheduled` for cost tracking.
+- **Afterwards:** the schedule was removed and redeployed straight after the run. The workspace
+  was deleted after that, and its managed resource group went with it [P8].
+
+| | Value | Source |
+|---|---|---|
+| Setup / execution / run | 323 s / 869 s / 1,193 s | [P7] |
+| Silver (no new Bronze files) / Gold | 63.0 s (0 rows) / 757.4 s | [P1] |
+| Gold built from Silver version | 7 (current Silver version 7) | [P1] [P2] |
+| Silver rows / duplicate keys / views | 142,728,341 / 0 / 562,648,784 | [P2] |
+| Gold rows / `is_spike` / `likely_automated` | 84,348 / 2,027 / 7 | [P2] |
+| Gold spikes `exceptAll` vs local Gold spikes | 0 rows both ways | [P2] |
+
+### Data Factory: a day of files with matching MD5s
+
+`pl_copy_pageviews_day(day)` takes a day and copies its 24 hourly files from
+`dumps.wikimedia.org` into `lake/landing/pageviews/<yyyy>/<yyyy-MM>/`. A file is named by the
+end of its hour, so day D runs from `…-D-010000` to `…-(D+1)-000000`.
+- **Defined in the repo:** the definitions are JSON in [`infra/adf/`](infra/adf/), deployed
+  with `az datafactory`.
+- **Copy settings:** a sequential ForEach copies one file at a time, using 2 DIU per copy.
+
+| Run for 2026-10-15 (manual trigger) | Value | Source |
+|---|---|---|
+| Pipeline status / duration | Succeeded / 916 s | [P9] |
+| Copy activities | 24 of 24 Succeeded, 26–75 s each, 2 DIU each | [P9] |
+| Bytes read = written | 1,419,840,372 | [P9] |
+| MD5 of each landed file = MD5 of the laptop's copy | 24 / 24 | [P10] |
+
+### Costs
+
+All costs are in USD from the Azure Cost Management view. They were read on
+2026-11-12 04:31 UTC [P11].
+
+| | Cost |
+|---|---|
+| Day 22 scheduled run only (tag `vantage_run=day22-scheduled`) | VM $0.1104, Databricks DBU $0.0807, public IP $0.0031, total **$0.1943** |
+| Data Factory run, 2026-11-11 UTC | data movement $0.1000, orchestration activity runs $0.0250, read/write ops $0.0002, monitoring $0.0002, total **$0.1253** |
+| **Phase 3 so far, by service** | Virtual Machines $0.8256, Azure Databricks $0.7248, Storage $0.1325, Data Factory $0.1253, Virtual Network (public IPs) $0.0190, Bandwidth $0.0005, total **$1.8277** |
+
+Costs post with a delay of up to a day, so 2026-11-11 may still grow a little. Storage keeps
+billing while the ADLS account exists.
+
+<sub>
+
+**Sources.**
+- [P1] `run_metrics` on ADLS: run `c48da087…` (2026-11-06, laptop → ADLS full run), run
+  `231c210a…` (Databricks full run), run `1d509f52…` (scheduled run; Gold `silver_version` 7).
+  Local Silver and Gold seconds are from [12].
+- [P2] Direct queries from the laptop on the ADLS tables: Silver `count()`, `GROUP BY
+  (project, title, hour) HAVING count > 1`, `sum(views)`; `count()` on each Gold table, with
+  `is_spike` / `likely_automated` filters. Also the Delta history version, and `exceptAll`
+  against `data/lake/gold/spikes` (76,848 rows each side).
+- [P3] Databricks Jobs API (`jobs get-run`, run 974171125724364): `setup_duration`,
+  `execution_duration`. Stage seconds are from [P1].
+- [P4] `az vm list-usage -l eastus` (Total Regional vCPUs limit 4). The subscription's
+  `subscriptionPolicies` (ARM `GET /subscriptions/{id}`) report `quotaId FreeTrial_2014-09-01`
+  and `spendingLimit On`.
+- [P5] The same queries as [P2] after Databricks run 974171125724364, plus a key diff of Silver
+  version 5 against version 2.
+- [P6] Delta `RESTORE TABLE … TO VERSION AS OF 2` and counts. Databricks run 145895131916361's
+  `runtime_check` log. Time-travel comparison of the 2026-10-15 partition at versions 7 and 2.
+- [P7] Databricks Jobs API, run 636280560090751: `trigger = PERIODIC`, `result_state =
+  SUCCESS`, `setup_duration`, `execution_duration`, `run_duration`.
+- [P8] `jobs get` shows no schedule. `az databricks workspace delete`, then
+  `az group exists -n rg-vantage-dbx-managed` returned `false`.
+- [P9] Data Factory run `8cc7f424-dd6c-11f1-a9fd-dfddbfd54fa0`: `pipeline-run show` and
+  `activity-run query-by-pipeline-run` (`dataRead`, `dataWritten`, `filesWritten`,
+  `usedDataIntegrationUnits`, `durationInMs`).
+- [P10] Spark `binaryFile` read of `landing/pageviews` (`md5(content)`) compared with
+  `hashlib.md5` of each file in `data/raw/pageviews`.
+- [P11] Cost Management `query` API (ActualCost): filtered by the tag; grouped by resource and
+  meter for 2026-11-11; grouped by service from 2026-10-01. There were no Azure resources
+  before Day 19.
+- [P12] Azure Databricks docs, Databricks SDK for Java, "Create a cluster with a specific JDK
+  version": "For Databricks Runtime versions 13.1 to 15.4, JDK 8 is the default, and JDK 17
+  is in Public Preview." It gives `JNAME=zulu17-ca-amd64` for JDK 17.
+  https://learn.microsoft.com/en-us/azure/databricks/dev-tools/sdk-java
+
+</sub>
+
+### Honest limits (Phase 3)
+
+- **Free Trial subscription.** It has a spending limit and a 4-vCPU regional quota. The
+  Databricks trial tier is refused on Free Trial subscriptions, so the workspace was Premium,
+  with DBUs billed.
+- **Single node.** The cluster has no workers, so these timings say nothing about how the job
+  scales. They are slower than the laptop.
+- **Development-mode bundle.** The job was deployed in Databricks Asset Bundle development
+  mode, so it got a `[dev <user>]`-prefixed name and lived under the user's workspace
+  folder. The schedule needed an explicit `pause_status: UNPAUSED`. It was never
+  deployed in production mode, with a service principal as the run identity.
+- **Preview runtime setting.** On DBR 15.4, JDK 17 is Public Preview [P12], so the Silver
+  parity fix relies on a preview runtime setting.
+- **Bronze was not built in the cloud.** The raw files live on the laptop, which loaded Bronze
+  to ADLS. Data Factory's landing copy proves ingestion into Azure works, but the pipeline
+  doesn't read from `landing/` yet.
+- **Phase 2 stayed local.** Kafka and the streaming tables were not moved to Azure.
+- **Workspace deleted.** The Databricks workspace is gone, so the job can't be rerun without
+  recreating it ([docs/databricks.md](docs/databricks.md) has the setup).
+
 ## How to run
 
 Requires **Python 3.11** and **Java 17**. Spark 3.5 supports Java 8, 11 and 17.
@@ -420,7 +615,7 @@ export JAVA_HOME=/opt/homebrew/opt/openjdk@17    # macOS/Homebrew; adjust for yo
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-pytest -q                                        # 93 tests
+pytest -q                                        # 119 tests
 
 # batch pipeline: bronze -> silver -> gold, one run_id, run_metrics row per stage
 python scripts/run_pipeline.py --start 2026-10-15T00 --end 2026-10-18T00
@@ -461,9 +656,10 @@ python scripts/build_co_spikes.py                # rebuild Gold co_spikes
   surviving a [restart test](docs/restart-test.md), and joined to the pageview spikes on
   normalized title + UTC hour to add the edit co-spike signal — with stream metrics and
   schema-drift handling in `run_metrics`. See [Phase 2 — streaming the edit feed](#phase-2--streaming-the-edit-feed).
-- **Phase 3 — cloud (planned, optional).** Run the same pipeline on Azure (ADLS
-  Gen2 storage, Databricks, Data Factory) and confirm the row counts match the
-  local run.
+- **Phase 3 — cloud. Done.** The batch tables on ADLS Gen2 match the local run. Silver and
+  Gold ran as a Databricks job, including one scheduled run, after a Java 8 vs 17
+  title-casing bug was fixed. Data Factory copied a day of raw files with matching MD5s.
+  See [Phase 3: Azure](#phase-3-azure).
 
 ---
 
