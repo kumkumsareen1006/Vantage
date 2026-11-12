@@ -402,12 +402,18 @@ and filters on `gold/co_spikes` (`scripts/build_co_spikes.py`); thresholds
 - **One laptop, one broker.** Kafka runs as a single broker with **replication factor 1**,
   so there is no failover; a lost broker volume would lose unconsumed messages. That is a
   deliberate local-scope choice, documented, not a production topology.
-- **The edit history has a 21-hour gap on 2026-10-26 to 10-27**, when the capture was
-  down. It falls outside the Gold join window and so doesn't affect the current results,
-  but it's a real gap in the recorded feed.
 - **Edits are joined only on the 2026-10-15 to 10-18 window so far.** That's the window
   the pageview Silver covers and the October edits were backfilled for; the live stream
   (November) accumulates for a future, wider join rather than being joined to views yet.
+- **What the edit history covers at shutdown:**
+  - Raw capture (`data/raw/edits/`): 2026-10-07 23:16 → 2026-11-05 02:34 UTC.
+    Kafka stream: 2026-11-05 01:53 → 2026-11-12 19:36 UTC.
+  - Two gaps: 2026-10-26 15:23 → 10-27 12:08 UTC (the capture was down and the resume
+    couldn't replay further back) and 2026-10-27 15:51 → 10-28 10:21 UTC (missing from the
+    upstream replay; cause unknown).
+  - Silver holds the Oct 15–17 batch window (945,776 rows) plus the Kafka span
+    (2,963,520 rows), 3,909,296 in total. Oct 18 → Nov 5 is kept raw and not loaded,
+    because the pageview window is Oct 15–17.
 
 ## Phase 3: Azure
 
